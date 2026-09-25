@@ -1,48 +1,103 @@
 # L3B Architecture Record
 
-## Luồng xử lý
+Team phải cập nhật tài liệu này cùng source. Mục tiêu là mô tả quyết định có thể kiểm chứng, không ghi prompt bí mật hoặc chain-of-thought.
+
+## System overview
+
+Repository triển khai một state machine bất đồng bộ thuần Python. Coordinator
+định tuyến case và phân giải các candidate order ID. Khi có đúng một order được
+resolve, các agent Order/Item, Payment và Shipment thu thập evidence song song.
+Policy Agent chỉ dùng các record đã thu thập; Verifier tạo output an toàn theo
+contract.
 
 ```text
-Input → Entity agent → Order agent → Payment agent → Shipment agent → Policy agent
-          │             │              │                 │                │
-          └─────────────┴──────────────┴─────────────────┴────────────────┘
-                                      │ MCP evidence broker (case-scoped cache)
-                                      ↓
-                     Coordinator → Groq 7B model verifier → Deterministic verifier
-                                      ↓
-                              Output + observable trace
+Input → Coordinator / Router → Order/Item Agent ┐
+              │ handoff          Payment Agent ─┼→ Policy Agent → Verifier → output
+              └→ Entity resolution Shipment Agent┘                     │
+                        │                     MCP evidence             └→ trace.jsonl
+                        └─ rejected candidates
 ```
 
-`src/student_agent/workflow.py` điều phối. `investigators.py` định nghĩa các specialist và evidence broker; `analysis.py` chuẩn hóa dữ kiện và chọn đúng purchase episode. Model chỉ nhận facts đã chuẩn hóa, không nhận lời nhắn khách hàng, API key hoặc nội dung thô từ MCP. Kết luận model chỉ được chấp nhận nếu nằm trong tập issue đã suy ra từ evidence; verifier xác định kiểm tra mọi quan hệ quan trọng trước khi finalize.
+Các JSON Schema trong `contracts/schemas/` là nguồn chân lý công khai.
+Workflow không thêm field cài đặt nội bộ vào output, trace, manifest hoặc MCP
+envelope.
 
-## Quyền và handoff
+## Agent ownership
 
-| Actor | Tool được gọi | Handoff |
-| --- | --- | --- |
-| Entity | `get_customer_history`, `get_order` | order phù hợp, candidate bị loại, customer context |
-| Order | `get_order_items`, `get_product_context` | item, seller, tổng giá hàng và freight theo purchase episode |
-| Payment | `get_order_payments`, `get_payment_timeline`, `get_refund_timeline` | capture, refund, trạng thái payment theo episode |
-| Shipment | `get_shipment_summary`, `get_sellers` | carrier/customer timeline, seller deadline, actor của event |
-| Policy | `get_policy` | rule đúng `policy_version` và issue |
-| Model verifier | Không gọi MCP | chọn trong candidate issue đã có evidence |
-| Deterministic verifier | Không gọi MCP | kiểm tra schema, refs, entity, tiền, status và action |
+| Actor | Input | Trách nhiệm | Quyền hạn | Handoff |
+| --- | --- | --- | --- | --- |
+| Coordinator | case và candidate ID | entity resolution có giới hạn, định tuyến | order lookup đã discovery | kết quả resolution cho specialists |
+| Order/Item | order ID đã resolve | item, seller, product | một item tool đã discovery | evidence cho policy |
+| Payment | order ID đã resolve | capture, trạng thái duplicate/refund | một payment tool đã discovery | evidence cho policy |
+| Shipment | order ID đã resolve | timeline giao hàng | một shipment tool đã discovery | evidence cho policy |
+| Customer | hint được bật | các order liên quan | customer tool đã discovery | evidence cho verifier |
+| Policy | version và evidence | diễn giải policy | policy tool đã discovery | evidence cho verifier |
+| Verifier | record đã thu thập | dựng output và kiểm tra invariant | không có | output và trace |
 
-Coordinator emit `task_assigned`; mỗi specialist emit `tool_result_consumed` sau khi dùng evidence và `handoff` sau khi hoàn thành. Trình tự mỗi case là `case_received` → specialist work → `verification_completed` → `case_finalized`. Trace không lưu chain-of-thought.
+Discovery không phải là quyền gọi tất cả tool: mỗi role chỉ chọn tối đa một tool
+phù hợp đã được discovery. Tool không tồn tại sẽ không bị đoán tên hoặc gọi.
 
-## Entity resolution và source conflict
+## Entity resolution và A2A protocol
 
-`claimed_order_id` là một candidate, không được mặc nhiên xác nhận. Entity agent chỉ gọi `get_order` cho ID hợp lệ, đối chiếu order ID, purchase timestamp và customer ID với customer history, rồi xác định resolved, ambiguous hoặc not_found. ID không hợp lệ được loại bằng kiểm tra định dạng. Evidence broker chỉ cache trong một case; mọi tool call luôn mang `case_id` và evidence refs giữ nguyên.
+Coordinator chỉ xét candidate được cung cấp, với giới hạn cứng là năm ID. Một
+order chỉ được chấp nhận khi response authoritative chứa chính ID đó. Với một
+candidate duy nhất, một exact lookup thành công cũng resolve candidate đó. Các
+candidate còn lại bị reject. Nếu có không hoặc nhiều ID còn lại, trạng thái là
+`not_found` hoặc `ambiguous` và specialist cần order sẽ không chạy.
 
-Một order ID có thể xuất hiện ở nhiều mốc mua. Với item, payment, refund và shipment rows có timestamp, mỗi row được gán cho purchase gần nhất trước nó trong customer history. `get_order` xác định purchase episode đang điều tra. Dated confirmed payment events được ưu tiên so với tổng của các base rows không có timestamp; event shipment đã xác nhận và actor của nó được ưu tiên khi phân trách nhiệm. Output ghi `data_conflicts` khi order/shipment status bất đồng hoặc tổng base payment chứa dòng ngoài episode.
+Mọi handoff liên kết theo `case_id` và emit sự kiện trace `handoff`. Luồng luôn
+không có chu trình: coordinator → specialists → policy → verifier. Không retry
+tự động; retry MCP có thể tăng audit cost và không an toàn với thao tác không
+idempotent.
 
-## Quy tắc nghiệp vụ và model
+## Evidence và conflict lifecycle
 
-Payment phân biệt captured, mismatch, duplicate capture, refund pending và refund failed bằng timeline đã scope. Shipment so carrier handoff với seller deadline, ngày giao với estimate và actor đã xác nhận. Policy agent đọc rule theo issue để lấy case status, action, party và refund amount; refund được giới hạn bởi số captured chưa hoàn. Claim được đánh giá riêng và chỉ liên kết refs phù hợp domain. Confidence giảm khi thiếu nguồn thiết yếu, policy hoặc model không đồng thuận.
+`EvidenceGateway` validate mọi MCP response bằng
+`mcp-evidence-response-v1.schema.json`. Một kết quả được dùng emit đúng
+`evidence_ref` do gateway cấp trong `tool_result_consumed`. Reference chỉ được
+lưu trong invocation hiện tại nên không thể dùng chéo case.
 
-Groq OpenAI-compatible endpoint dùng `allam-2-7b` (7B), temperature 0 và JSON mode. Cấu hình lấy từ `.env`: `AGENT_BASE_URL`, `AGENT_MODEL`, `AGENT_MODEL_PARAMS_B`, `AGENT_API_KEY`. `AGENT_MODEL_PARAMS_B` bắt buộc lớn hơn 0 và không quá 10. Không ghi key vào source, trace, output hay submission.
+Verifier chỉ suy ra entity, trạng thái và số tiền từ MCP `data`. Evidence thiếu
+hoặc mâu thuẫn tạo `insufficient_evidence`, không tạo dữ kiện giả. Trường
+`data_conflicts` để rỗng cho tới khi conflict authoritative có thể biểu diễn
+bằng public output contract. Evidence của claim, evidence top-level và trace
+dùng chung các reference đã thu thập.
 
-## Failure, hiệu quả và reproducibility
+## Failure and efficiency policy
 
-Gateway chỉ gọi các tool đã discover, mỗi `(tool, arguments)` tối đa một lần trong một case. Tool không khả dụng được đánh dấu thiếu evidence; không tạo giá trị giả. Model được thử tối đa hai lần nếu trả kết quả không hợp lệ. Chạy tuần tự để giữ trace và audit dễ kiểm chứng; không cache refs qua case hoặc qua run.
+| Failure | Retry | Fallback | Kết quả quan sát được |
+| --- | ---: | --- | --- |
+| MCP lỗi hoặc timeout | 0 | bỏ result, dùng insufficient evidence | `tool_unavailable` |
+| Entity chưa resolve | 0 | bỏ specialists cần order | `handoff` có trạng thái resolution |
+| Source thiếu/mâu thuẫn | 0 | không refund hoặc action suy đoán | verifier `contract_safe` |
+| MCP envelope không hợp lệ | 0 | gateway từ chối | data chưa validate không đến output |
 
-`day09 run` tạo outputs và trace trong thư mục staging. Chỉ khi đủ 100 case và toàn bộ artifact pass contract, runner mới đưa chúng vào `outputs/` và `traces/`; artifact trước đó được lưu ở `.run-backups/`. Dùng `day09 validate-inputs`, `pytest`, `day09 validate`, rồi `day09 package --output dist/submission.zip`. Python >=3.11; dependency ranges theo `pyproject.toml`. Không dùng randomness trong logic xác định, model temperature 0.
+Tool discovery được cache theo vòng đời gateway. Call tương đương được khử lặp
+trong một case; candidate resolution bị giới hạn; chỉ các specialist độc lập
+chạy đồng thời. Không có cache chéo case.
+
+## Verification invariants
+
+- Required field và tên field khớp chính xác `l3b-output-v2.schema.json`.
+- `case_id`, evidence reference và trace event của output luôn thuộc case hiện tại.
+- Resolved candidate và rejected candidate không giao nhau.
+- Giá trị entity, shipment, payment và customer đều có nguồn evidence.
+- Monetary value là BRL không âm; confidence luôn trong `[0, 1]`.
+- Timeline/evidence thiếu được map về `needs_investigation`, không phải kết luận giả.
+- CLI validate lại output, trace và manifest trước khi ghi hoặc đóng gói.
+
+## Reproducibility
+
+Python 3.11+ và dependency range được khai báo trong `pyproject.toml`. Workflow
+không dùng model call, random seed hay log có secret. Nhánh concurrent có tối đa
+bốn call độc lập (ba specialist và customer).
+
+```bash
+python -m pip install -e ".[dev]"
+day09 validate-inputs
+day09 run
+day09 validate
+day09 package --output dist/submission.zip
+```
+
+Team API key nằm trong `.env`, không được ghi vào submission hoặc trace.
