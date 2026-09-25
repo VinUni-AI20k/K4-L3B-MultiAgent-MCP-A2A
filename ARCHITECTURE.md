@@ -1,74 +1,70 @@
 # L3B Architecture Record
 
-## 1. System overview
+## 1. Tổng quan
+
+Hệ thống điều tra từng khiếu nại bằng `solve_case(case, gateway, trace)`. Workflow dùng các quy tắc trong Python, không gọi mô hình ngôn ngữ. Dữ liệu nghiệp vụ được lấy qua MCP; kết quả cuối cùng là JSON theo schema L3B và trace ghi lại các bước xử lý.
 
 ```text
-case input
-  -> entity-agent -> customer-agent -> coordinator
-                                   -> order-product-agent
-                                   -> shipment-agent
-                                   -> payment-agent (payment/refund)
-                                   -> policy-agent
-  -> conflict-resolver -> verifier -> schema-valid output
-          |                  |
-          +--- MCP evidence -+---- observable trace
+Case input
+  → Coordinator
+  → Policy agent
+  → Entity agent
+  → Customer agent + Order agent
+  → Conflict resolver
+  → Shipment agent + Payment agent
+  → Classifier + Policy decision
+  → Verifier
+  → Output JSON + trace
 ```
 
-`solve_case` is an evidence-first coordinator. It discovers the MCP tool names once per gateway, then calls only discovered tools. The coordinator resolves an order before granting downstream specialists an `order_id`; therefore shipment, payment, refund, and policy calls cannot accidentally be made against an unresolved candidate.
+Mỗi lần gọi `solve_case` tạo một `CaseContext` riêng để giữ dữ liệu, bộ nhớ đệm và các `evidence_ref` của đúng case đó.
 
-## 2. Agent ownership
+## 2. Vai trò các agent
 
-| Actor | Input | Responsibility | Permitted MCP domain | Handoff |
-| --- | --- | --- | --- | --- |
-| entity-agent | claimed ID, candidates, customer hint | Read candidates and resolve/reject orders | order | entity resolution |
-| customer-agent | customer hint and scope | Obtain related-order context only when requested | customer | customer context |
-| coordinator | specialist outputs | Assign work, keep case-local evidence registry | none directly | bounded tasks |
-| order-product-agent | one resolved order ID | Identify item and seller entities | item/product | item entities |
-| shipment-agent | one resolved order ID | Assess shipment timeline and delivery state | shipment | shipment verdict |
-| payment-agent | one resolved order ID | Reconcile capture and refund evidence | payment/refund | payment verdict/totals |
-| policy-agent | resolved ID if present | Fetch policy evidence; never infer eligibility if unavailable | policy | policy availability |
-| conflict-resolver | observed domain values | Mark unresolved cross-source conflict | none | conflict record |
-| verifier | assembled output | Enforce conservative status, evidence linkage, and schema invariants | none | final result |
+| Vai trò | Công việc |
+| --- | --- |
+| Coordinator | Điều phối các bước và ghi sự kiện giao việc, bàn giao trong trace. |
+| Policy agent | Lấy chính sách theo `policy_version`; dùng quy tắc tương ứng để xác định hành động và khoản hoàn tiền. |
+| Entity agent | Kiểm tra order ID được khai báo và các candidate; gọi `get_order` với ID hợp lệ. |
+| Customer agent | Lấy lịch sử khách hàng khi case có `customer_unique_id_hint`. |
+| Order agent | Lấy các item và seller của order đã xác định. |
+| Conflict resolver | So sánh bản ghi order và customer history, chọn dòng thời gian phục vụ case và ghi nhận khác biệt giữa hai nguồn. |
+| Shipment agent | Phân tích thời điểm giao hàng và sự kiện vận chuyển thuộc dòng thời gian đã chọn. |
+| Payment agent | Phân tích sự kiện thanh toán; gọi thêm refund timeline khi cần. |
+| Verifier | Kiểm tra sự nhất quán của kết quả trước khi trả output. |
 
-Each tool result is validated by `EvidenceGateway` against the evidence contract before it can enter the case evidence registry. The workflow only puts returned `evidence_ref` values into output or trace.
+Các vai trò trên là các hàm trong cùng workflow. Việc giao việc và bàn giao được thể hiện bằng các sự kiện `task_assigned` và `handoff` trong trace; hệ thống không triển khai một dịch vụ A2A riêng.
 
-## 3. Entity resolution and A2A protocol
+## 3. Luồng xử lý một case
 
-Every message is correlated by the input `case_id`; task payloads carry only the minimum needed identifier and returned evidence, never private reasoning. The entity agent examines a claimed candidate first, then the remaining candidates in input order. A candidate is resolved only when it matches the supplied `customer_unique_id_hint`; with no hint, exactly one successfully retrieved candidate may be provisionally resolved at lower confidence. Multiple matches are `ambiguous`; absent usable order evidence is `not_found`.
+Policy được tải trước bằng `get_policy`. Entity agent ưu tiên `claimed_order_id`, sau đó xét các candidate theo thứ tự đầu vào. ID không đúng định dạng bị loại mà không gọi MCP. Nếu không xác định được order, workflow tạo kết quả `insufficient_evidence` và `needs_investigation`.
 
-Downstream investigation starts only for exactly one resolved order. Handoffs are acyclic: entity/customer/specialists -> coordinator -> conflict resolver -> verifier. A specialist receives one task per domain, and all tool calls have at most two attempts. This avoids both fan-out on ambiguous candidates and retry loops.
+Khi có order, workflow lấy customer history và order items. Conflict resolver so sánh bản ghi từ `get_order` với bản ghi cùng order ID trong customer history. Khi chọn một dòng thời gian, các trường khác nhau được ghi trong `data_conflicts` cùng nguồn được chọn. Sau đó shipment và payment agent chỉ xét các sự kiện phù hợp với dòng thời gian này.
 
-## 4. Evidence and conflict lifecycle
+Workflow phân loại vấn đề từ dữ liệu shipment và payment. Chính sách cung cấp trạng thái case, hành động đề xuất và mức hoàn tiền khi có quy tắc tương ứng. Verifier kiểm tra các quan hệ như tổng refund lines bằng mức hoàn tiền đề xuất và `no_action` không đi cùng khoản hoàn tiền dương.
 
-Evidence is held only in memory for the current `solve_case` call. Successful MCP results emit `tool_result_consumed` with the returned reference. Failures produce no evidence reference and are represented by conservative output fields (`null`, `insufficient_evidence`, or `needs_investigation`).
+## 4. Evidence và trace
 
-The resolver compares independently observed status values from the order and shipment sources. If they disagree, it adds a `data_conflicts` entry with `selected_source: null`, changes shipment to `conflicting`, and suppresses a causal conclusion. It does not choose a source merely to complete a result. Financial fields are populated only from named numeric fields in payment/refund evidence. The workflow does not calculate a refund recommendation from missing policy; `recommended_refund_brl: 0.0` with no refund line means no amount has been authorized, not that evidence established a zero entitlement.
+Mọi lần gọi MCP đều truyền `case_id` hiện tại. `CaseContext` chỉ dùng `evidence_ref` do MCP trả về; không tự tạo hoặc sửa reference. Tool result hợp lệ được ghi bằng sự kiện `tool_result_consumed`. Output chọn các evidence liên quan đến vấn đề đã phân loại.
 
-## 5. Failure and efficiency policy
+Các lời gọi trùng tool và tham số được lưu trong cache của **cùng case** để tránh gọi lại. Lỗi tool được ghi nhận nhưng không tạo evidence giả. Lỗi kết nối được báo lên để quá trình chạy có thể xử lý, thay vì tự kết luận khi chưa lấy được dữ liệu.
 
-| Failure | Retry budget | Fallback | Observable result |
-| --- | ---: | --- | --- |
-| MCP timeout/error | 2 attempts | Do not synthesize evidence | specialist handoff `evidence_unavailable` |
-| Tool absent from discovery | 0 calls | Skip guessed tool name | `tool_unavailable`; conservative output |
-| Entity unavailable/ambiguous | candidate calls only | Do not call order-scoped domains | `not_found`/`ambiguous`, `needs_investigation` |
-| Source conflict | 0 extra calls | Preserve both source labels | unresolved conflict record |
-| Invalid evidence envelope | 0 use | Gateway rejects it | no evidence ref is emitted |
+## 5. Trường hợp thiếu dữ liệu và kiểm tra
 
-Tool discovery is cached on the gateway, so it occurs at most once per run connection. Evidence is never cached across cases. Calls are scoped to exact candidate IDs and, after resolution, one order ID only.
+Khi không tìm được order hoặc solver không thể hoàn thành, workflow trả kết quả dự phòng với `insufficient_evidence`, `needs_investigation`, các tổng tiền chưa biết là `null` và không tạo refund line. Trace vẫn ghi sự kiện `verification_completed`.
 
-## 6. Verification invariants
+Verifier kiểm tra tính nhất quán của issue, bên chịu trách nhiệm, hành động và số tiền. Nếu phát hiện vấn đề, workflow giảm confidence và ghi các cảnh báo vào trace. CLI tiếp tục kiểm tra output theo JSON schema.
 
-Before returning, the verifier checks these invariants by construction:
+## 6. Chạy và nộp
 
-- output has the L3B schema version and the original `case_id`;
-- resolved order IDs are a subset of successfully evidenced candidates, while rejected IDs are remaining input candidates;
-- all output evidence references were returned by the current case's MCP calls and were traced when consumed;
-- shipment/payment fields are `insufficient_evidence`/`null` when no single order is resolved;
-- a detected source conflict prevents a causal conclusion;
-- totals are non-negative values from evidence only; no refund line or non-zero recommendation is fabricated;
-- confidence remains within `[0, 1]`, and unresolved evidence yields `needs_investigation`;
-- trace has task assignments, handoffs, policy decision, verification, and is finalized by the CLI.
+Yêu cầu Python 3.11 trở lên. Các lệnh sử dụng:
 
-## 7. Reproducibility
+```powershell
+day09 validate-inputs
+day09 mcp-tools
+day09 run
+day09 validate
+day09 package --output dist/submission.zip
+```
 
-The project targets Python 3.11+ and pins runtime/dev dependency ranges in `pyproject.toml`. The workflow is deterministic: it preserves candidate input order, makes no model call, uses no random seed, and has a fixed retry limit of two. There is no specialist concurrency because MCP audit efficiency and deterministic trace ordering take precedence. Run local checks with `ruff check .` and `pytest -q`; do not place credentials, inputs, generated outputs, or traces under version control.
+ZIP nộp bài chứa `manifest.json`, `trace.jsonl` và các JSON trong `outputs/`. Không đưa `.env`, API key, input, mã nguồn hoặc thư mục `debug/` vào ZIP.
