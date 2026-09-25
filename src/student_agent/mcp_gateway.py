@@ -22,12 +22,16 @@ class EvidenceGateway:
         return sorted(tool.name for tool in response.tools)
 
     async def call(self, tool_name: str, *, case_id: str, **arguments: str) -> dict[str, Any]:
+        if not isinstance(tool_name, str) or not tool_name.strip():
+            raise ValueError("MCP tool name must be non-empty")
+        if not isinstance(case_id, str) or not case_id.strip():
+            raise ValueError("MCP case_id must be non-empty")
         payload = {"case_id": case_id, **arguments}
         result = await self._session.call_tool(tool_name, arguments=payload)
-        is_err = getattr(result, "is_error", None)
-        if is_err is None:
-            is_err = getattr(result, "isError", False)
-        if is_err:
+        is_error = getattr(result, "is_error", None)
+        if is_error is None:
+            is_error = getattr(result, "isError", False)
+        if is_error:
             message = " ".join(
                 block.text for block in result.content if getattr(block, "text", None)
             )
@@ -40,6 +44,10 @@ class EvidenceGateway:
             if len(text_blocks) != 1:
                 raise ValueError(f"MCP tool {tool_name} did not return one evidence object")
             evidence = json.loads(text_blocks[0])
+        if not isinstance(evidence, dict):
+            raise ValueError(f"MCP tool {tool_name} did not return an evidence object")
+        # The gateway validates and returns the server envelope unchanged. In
+        # particular, evidence_ref is never generated, normalized, or replaced.
         self._contracts.validate_evidence(evidence, f"MCP tool {tool_name}")
         return evidence
 

@@ -12,18 +12,29 @@ Input → Entity Resolver → Coordinator → Specialists → Conflict Resolver 
             └──────────────────────────── MCP ────────────────┴──────────── Trace
 ```
 
-## 2. Agent ownership
+## 2. MCP Gateway boundary
+
+`EvidenceGateway.call()` is the only boundary used by specialist agents. It always sends the
+current case ID, rejects an empty tool or case ID, accepts structured content or one JSON text
+block, validates the complete `mcp-evidence-response-v1` envelope, and returns the server object
+unchanged. The client never creates, hashes, normalizes, or substitutes `evidence_ref`.
+
+`InvestigationContext.call()` owns the observable consumption step: it records the server-provided
+reference in the case-local registry and emits exactly one `tool_result_consumed` event for each
+uncached successful call. Failed calls produce no fabricated evidence or trace reference.
+
+## 3. Agent ownership
 
 | Actor | Input | Trách nhiệm | Tool permission | Output/handoff |
 | --- | --- | --- | --- | --- |
 | Entity/customer | Claimed/candidate order IDs và customer hint | Xác minh candidate, xếp hạng, hiệu chỉnh confidence | `get_order` | `EntityResolution` kèm evidence refs về Coordinator |
 | Coordinator | `customer_request`, claims và entity result | Chuẩn hóa request, route worker, quản lý evidence cache, merge kết quả | Không gọi domain tool trực tiếp | Case plan và task assignment cho specialists |
-| Order/product | TODO | TODO | TODO | TODO |
-| Shipment | TODO | TODO | TODO | TODO |
-| Payment/refund | TODO | TODO | TODO | TODO |
+| Order/product | Resolved order IDs | Preserve item/seller identity for output | `get_order_items` | Item and seller IDs to Coordinator |
+| Shipment | Resolved order IDs | Compare promised and actual delivery dates; assign responsibility | `get_order`, `get_order_items`, `get_shipment` | `shipment_analysis` to Coordinator |
+| Payment/refund | Resolved order IDs | Reconcile captured/refunded/refundable amounts and statuses | `get_payment`, `get_refund` | `payment_analysis` to Coordinator |
 | Policy | Entity result, claims và kết quả shipment/payment nếu có | Gọi `get_policy`, kiểm tra thời hạn 7/30 ngày và đánh giá claim | `get_policy` | `PolicyAnalysis` về Coordinator |
-| Conflict resolver | TODO | TODO | TODO | TODO |
-| Verifier | TODO | TODO | TODO | TODO |
+| Conflict resolver | Specialist results and policy evidence | Detect conflicts and apply policy > payment > logistics precedence | None | `data_conflicts` and root-cause data to Verifier |
+| Verifier | Complete merged result | Check schema-related invariants, evidence scope and confidence | None | Validated output and `verification_completed` |
 
 Áp dụng least privilege; tool discovery không đồng nghĩa mọi actor đều được gọi mọi tool.
 
@@ -53,12 +64,24 @@ trạng thái thiếu evidence; không suy đoán 7/30 ngày.
 
 | Failure | Retry budget | Fallback | Trace event/code |
 | --- | ---: | --- | --- |
-| MCP timeout | TODO | TODO | TODO |
-| Entity not found/ambiguous | TODO | TODO | TODO |
-| Source conflict | TODO | TODO | TODO |
-| Invalid specialist result | TODO | TODO | TODO |
+| MCP timeout | 0 retries | Keep `insufficient_evidence`; never invent data | Successful calls emit `tool_result_consumed` |
+| Entity not found/ambiguous | 0 retries | Do not call downstream tools without a resolved order | `handoff` with entity status |
+| Source conflict | 0 retries | Preserve conflict; apply policy > payment > logistics | `policy_decided` / verifier metadata |
+| Invalid specialist result | 0 retries | Use schema-safe insufficient-evidence result | `verification_completed` after validation |
 
 Nêu query budget/cache strategy để tránh gọi lặp và quét rộng. Retry phải có giới hạn, idempotent và không biến missing evidence thành dữ liệu phỏng đoán.
+
+Query budget is case-scoped and deterministic: candidate resolution calls `get_order` once per
+candidate; specialists call domain tools only for the resolved order; `InvestigationContext`
+caches identical `(tool, arguments)` calls. There is no broad scan and no retry, so missing
+evidence cannot become invented data.
+
+The verifier recalibrates confidence from evidence coverage, unresolved entity state and source
+conflicts. It enforces responsibility consistency: seller-delay cases cannot assign the logistics
+provider as the sole responsible party, and logistics-delay cases cannot assign the seller as the
+sole responsible party. Refund lines must sum to the recommended BRL amount; unsupported or
+insufficient-evidence cases cannot recommend a refund. Finalization occurs only after these
+checks and `verification_completed`.
 
 ## 6. Verification invariants
 
