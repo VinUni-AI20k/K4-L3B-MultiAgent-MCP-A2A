@@ -1925,10 +1925,6 @@ async def solve_case(
     if not context.evidence_refs:
         raise RuntimeError(f"{plan.case_id}: no MCP evidence; refusing to finalize this case")
 
-    if entity_res.resolved_order_ids:
-        order_id = entity_res.resolved_order_ids[0]
-        await context.call("order-product-worker", "get_product_context", order_id=order_id)
-
     # Task 3: Logistics Worker
     shipment_analysis: dict[str, Any] = {
         "verdict": "insufficient_evidence",
