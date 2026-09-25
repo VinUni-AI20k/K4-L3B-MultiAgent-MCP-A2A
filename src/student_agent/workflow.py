@@ -991,12 +991,285 @@ def _parse_date(value: Any) -> Any:
     return None
 
 
+# =============================================================================
+# TASK 6: Conflict Resolution & Verifier
+# =============================================================================
+
+# Precedence order for conflicting sources (higher = more authoritative)
+_SOURCE_PRECEDENCE = {
+    "policy": 100,
+    "payment": 80,
+    "financial": 80,
+    "logistics": 60,
+    "order": 50,
+    "customer": 40,
+    "default": 30,
+}
+
+
+@dataclass
+class ConflictResolution:
+    """Result of conflict resolution analysis."""
+    conflicts: list[dict[str, Any]]
+    root_causes: list[dict[str, Any]]
+    responsible_parties: list[dict[str, Any]]
+
+
+def resolve_conflicts(
+    plan: CasePlan,
+    context: InvestigationContext,
+    entity_res: EntityResolution,
+    logistics_result: dict[str, Any] | None,
+    financial_result: dict[str, Any] | None,
+) -> ConflictResolution:
+    """Detect and resolve conflicts between data sources.
+
+    Precedence: policy > payment > logistics > order > customer
+    """
+    conflicts: list[dict[str, Any]] = []
+    root_causes: list[dict[str, Any]] = []
+    responsible_parties: list[dict[str, Any]] = []
+
+    # Collect all data from workers
+    all_data: dict[str, list[tuple[str, Any]]] = {
+        "logistics": [],
+        "financial": [],
+    }
+
+    if logistics_result:
+        all_data["logistics"].append(("shipment_verdict", logistics_result.get("verdict", "")))
+        for seller_id in logistics_result.get("late_seller_ids", []):
+            all_data["logistics"].append(("late_seller", seller_id))
+
+    if financial_result:
+        all_data["financial"].append(("payment_verdict", financial_result.get("verdict", "")))
+        all_data["financial"].append(("captured", financial_result.get("captured_total_brl")))
+        all_data["financial"].append(("refunded", financial_result.get("refunded_total_brl")))
+
+    # Detect conflicts between sources
+    conflicts = _detect_source_conflicts(all_data)
+
+    # Determine root causes based on verdict combinations
+    root_causes, parties = _analyze_root_causes(
+        plan, entity_res, logistics_result, financial_result
+    )
+    responsible_parties.extend(parties)
+
+    return ConflictResolution(
+        conflicts=conflicts,
+        root_causes=root_causes,
+        responsible_parties=responsible_parties,
+    )
+
+
+def _detect_source_conflicts(all_data: dict[str, list[tuple[str, Any]]]) -> list[dict[str, Any]]:
+    """Detect conflicts between different data sources."""
+    conflicts: list[dict[str, Any]] = []
+
+    # Check for logistics vs financial conflicts
+    logistics_verdict = None
+    for key, val in all_data.get("logistics", []):
+        if key == "shipment_verdict":
+            logistics_verdict = val
+            break
+
+    financial_verdict = None
+    for key, val in all_data.get("financial", []):
+        if key == "payment_verdict":
+            financial_verdict = val
+            break
+
+    # Conflict: logistics says on_time but financial requests refund
+    if logistics_verdict and financial_verdict:
+        if logistics_verdict == "on_time" and financial_verdict in ("refund_pending", "refund_failed"):
+            conflicts.append({
+                "field": "shipment_status vs refund_eligibility",
+                "sources": ["logistics-worker", "financial-worker"],
+                "selected_source": "logistics-worker",
+                "resolution_code": "LOGISTICS_TAKES_PRECEDENCE",
+            })
+
+        # Conflict: logistics says lost but no refund initiated
+        if logistics_verdict == "lost" and financial_verdict not in ("refund_pending", "refunded"):
+            conflicts.append({
+                "field": "shipment_status vs refund_action",
+                "sources": ["logistics-worker", "financial-worker"],
+                "selected_source": "logistics-worker",
+                "resolution_code": "REFUND_REQUIRED",
+            })
+
+    # Check for data consistency within financial
+    captured = None
+    refunded = None
+    for key, val in all_data.get("financial", []):
+        if key == "captured" and val is not None:
+            captured = val
+        if key == "refunded" and val is not None:
+            refunded = val
+
+    if captured is not None and refunded is not None:
+        if refunded > captured:
+            conflicts.append({
+                "field": "captured_total_brl vs refunded_total_brl",
+                "sources": ["payment-db"],
+                "selected_source": "payment-db",
+                "resolution_code": "DATA_INCONSISTENCY",
+            })
+
+    return conflicts
+
+
+def _analyze_root_causes(
+    plan: CasePlan,
+    entity_res: EntityResolution,
+    logistics_result: dict[str, Any] | None,
+    financial_result: dict[str, Any] | None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Analyze root causes and responsible parties."""
+    root_causes: list[dict[str, Any]] = []
+    responsible_parties: list[dict[str, Any]] = []
+    rank = 1
+
+    # Check logistics issues
+    if logistics_result:
+        verdict = logistics_result.get("verdict", "")
+
+        if verdict == "seller_delay":
+            root_causes.append({
+                "cause_code": "SELLER_SHIPMENT_DELAY",
+                "rank": rank,
+            })
+            rank += 1
+            for seller_id in logistics_result.get("late_seller_ids", []):
+                if not str(seller_id).startswith("candidate"):
+                    responsible_parties.append({
+                        "party_type": "seller",
+                        "party_id": seller_id,
+                    })
+
+        elif verdict == "logistics_delay":
+            root_causes.append({
+                "cause_code": "LOGISTICS_PROVIDER_DELAY",
+                "rank": rank,
+            })
+            rank += 1
+            responsible_parties.append({
+                "party_type": "logistics_provider",
+                "party_id": None,
+            })
+
+        elif verdict == "lost":
+            root_causes.append({
+                "cause_code": "SHIPMENT_LOST",
+                "rank": rank,
+            })
+            rank += 1
+            responsible_parties.append({
+                "party_type": "logistics_provider",
+                "party_id": None,
+            })
+
+        elif verdict == "returned":
+            root_causes.append({
+                "cause_code": "ORDER_RETURNED",
+                "rank": rank,
+            })
+            rank += 1
+            responsible_parties.append({
+                "party_type": "customer",
+                "party_id": plan.customer_unique_id,
+            })
+
+    # Check financial issues
+    if financial_result:
+        verdict = financial_result.get("verdict", "")
+
+        if verdict == "refund_pending":
+            if not any(rc.get("cause_code") == "REFUND_NOT_PROCESSED" for rc in root_causes):
+                root_causes.append({
+                    "cause_code": "REFUND_NOT_PROCESSED",
+                    "rank": rank,
+                })
+                rank += 1
+                responsible_parties.append({
+                    "party_type": "platform",
+                    "party_id": None,
+                })
+
+        elif verdict == "refund_failed":
+            if not any(rc.get("cause_code") == "REFUND_FAILED" for rc in root_causes):
+                root_causes.append({
+                    "cause_code": "REFUND_FAILED",
+                    "rank": rank,
+                })
+                rank += 1
+                responsible_parties.append({
+                    "party_type": "payment_provider",
+                    "party_id": None,
+                })
+
+        elif verdict == "capture_mismatch":
+            root_causes.append({
+                "cause_code": "PAYMENT_MISMATCH",
+                "rank": rank,
+            })
+            rank += 1
+            responsible_parties.append({
+                "party_type": "platform",
+                "party_id": None,
+            })
+
+    # Entity resolution issues
+    if entity_res.status == "ambiguous":
+        root_causes.append({
+            "cause_code": "ENTITY_AMBIGUITY",
+            "rank": rank,
+        })
+        responsible_parties.append({
+            "party_type": "unknown",
+            "party_id": None,
+        })
+
+    elif entity_res.status == "not_found":
+        root_causes.append({
+            "cause_code": "ORDER_NOT_FOUND",
+            "rank": rank,
+        })
+        responsible_parties.append({
+            "party_type": "unknown",
+            "party_id": None,
+        })
+
+    return root_causes, responsible_parties
+
+
+def select_authoritative_source(
+    sources: list[str],
+) -> str | None:
+    """Select the most authoritative source based on precedence."""
+    if not sources:
+        return None
+
+    best_source = None
+    best_precendence = -1
+
+    for source in sources:
+        source_lower = source.lower()
+        precedence = _SOURCE_PRECEDENCE.get(source_lower, _SOURCE_PRECEDENCE["default"])
+
+        if precedence > best_precendence:
+            best_precendence = precedence
+            best_source = source
+
+    return best_source
+
+
 async def solve_case(
     case: dict[str, Any], gateway: EvidenceGateway, trace: TraceWriter
 ) -> dict[str, Any]:
-    """Run coordinator stages: Entity Resolution + Logistics Worker.
+    """Run coordinator stages: Entity Resolution + Logistics Worker + Conflict Resolver.
 
-    Tasks 4-7 must build remaining specialist analyses and final schema output.
+    Tasks 4-5 must build remaining specialist analyses (financial, policy) and final output.
     """
 
     plan = build_case_plan(case)
@@ -1006,17 +1279,43 @@ async def solve_case(
     entity_res = await resolve_entity(plan, context)
 
     # Task 3: Logistics Worker
-    shipment_analysis = {"verdict": "insufficient_evidence", "late_seller_ids": [], "timeline_complete": False}
+    shipment_analysis: dict[str, Any] = {
+        "verdict": "insufficient_evidence",
+        "late_seller_ids": [],
+        "timeline_complete": False,
+    }
     if "logistics-worker" in plan.workers and entity_res.resolved_order_ids:
         shipment_analysis = await logistics_worker(entity_res.resolved_order_ids, context)
 
-    # Tasks 4-7 must build: financial_worker, policy_worker, conflict_resolver, verifier, final output
+    # Task 6: Conflict Resolution & Verifier
+    conflict_res = resolve_conflicts(
+        plan=plan,
+        context=context,
+        entity_res=entity_res,
+        logistics_result=shipment_analysis,
+        financial_result=None,  # TODO: Task 4 will provide this
+    )
+
+    trace.emit(
+        case_id=plan.case_id,
+        event_type="task_assigned",
+        actor="coordinator",
+        target="conflict-resolver",
+        decision_code="RESOLVE_CONFLICTS",
+        attributes={
+            "conflict_count": len(conflict_res.conflicts),
+            "root_cause_count": len(conflict_res.root_causes),
+        },
+    )
+
+    # Tasks 4-5, 7 must build: financial_worker, policy_worker, verifier, final output
     for worker in plan.workers[1:]:
-        trace.emit(
-            case_id=plan.case_id,
-            event_type="task_assigned",
-            actor="coordinator",
-            target=worker,
-            decision_code=f"INVESTIGATE_{re.sub(r'[^A-Z0-9]+', '_', plan.topic.upper())}",
-        )
-    raise NotImplementedError("Tasks 4-7 must build specialist analyses and final output")
+        if worker not in ("logistics-worker", "conflict-resolver"):
+            trace.emit(
+                case_id=plan.case_id,
+                event_type="task_assigned",
+                actor="coordinator",
+                target=worker,
+                decision_code=f"INVESTIGATE_{re.sub(r'[^A-Z0-9]+', '_', plan.topic.upper())}",
+            )
+    raise NotImplementedError("Tasks 4-5, 7 must build specialist analyses and final output")
