@@ -48,13 +48,10 @@ class VerifierAgent:
             verdict = adjudication.claim_verdicts.get(cid, "unsupported")
 
             # Route relevant evidence refs based on topic
-            refs_for_claim = []
-            if "shipment" in topic or "delivery" in topic:
-                refs_for_claim = shipment_findings.evidence_refs or all_collected_refs[:2]
-            elif "payment" in topic or "charge" in topic or "refund" in topic:
-                refs_for_claim = payment_findings.evidence_refs or all_collected_refs[:2]
+            if hasattr(context, "get_evidence_for_topic"):
+                refs_for_claim = context.get_evidence_for_topic(topic)
             else:
-                refs_for_claim = order_findings.evidence_refs or all_collected_refs[:2]
+                refs_for_claim = all_collected_refs[:3]
 
             claim_assessments.append(
                 {
@@ -72,12 +69,39 @@ class VerifierAgent:
             refund_brl = captured
 
         refund_lines = []
-        if refund_brl > 0:
+        if adjudication.case_status in ("no_action", "needs_investigation"):
+            refund_brl = 0.0
+            refund_lines = []
+        elif refund_brl > 0:
+            if adjudication.primary_issue in ("late_delivery_seller", "unavailable_order_paid"):
+                target_seller = None
+                for rp in adjudication.responsible_parties:
+                    if rp.get("party_type") == "seller":
+                        target_seller = rp.get("party_id")
+                        break
+                default_seller = order_findings.seller_ids[0] if order_findings.seller_ids else None
+                line_entity = target_seller or default_seller
+            elif adjudication.primary_issue == "late_delivery_logistics":
+                default_ship = f"shipment-{resolved_order_id[:12]}"
+                if shipment_findings.shipment_ids:
+                    line_entity = shipment_findings.shipment_ids[0]
+                else:
+                    line_entity = default_ship
+            elif adjudication.primary_issue in (
+                "duplicate_charge",
+                "payment_mismatch",
+                "refund_failed",
+            ):
+                refs = payment_findings.payment_references
+                line_entity = refs[0] if refs else None
+            else:
+                line_entity = resolved_order_id
+
             refund_lines.append(
                 {
-                    "reason_code": adjudication.recommended_action.upper(),
+                    "reason_code": adjudication.primary_issue,
                     "amount_brl": round(refund_brl, 2),
-                    "entity_id": resolved_order_id,
+                    "entity_id": line_entity,
                 }
             )
 
@@ -112,15 +136,20 @@ class VerifierAgent:
             )
 
         # 5. Resolution actions
-        actions = [adjudication.recommended_action]
-        if "notify_customer" not in actions:
-            actions.append("notify_customer")
-        actions = list(dict.fromkeys(actions))[:8]
+        if adjudication.case_status == "no_action":
+            actions = ["document_no_action"]
+        elif adjudication.case_status == "needs_investigation":
+            actions = ["monitor_refund"]
+        else:
+            actions = [adjudication.recommended_action, "notify_customer"]
+            actions = list(dict.fromkeys(actions))[:8]
 
-        # 6. Payment references
+        # 6. Payment references & Shipment IDs
         payment_refs = payment_findings.payment_references
         if not payment_refs:
             payment_refs = [f"pay_{resolved_order_id[:8]}_1"]
+
+        shipment_ids = shipment_findings.shipment_ids or [f"shipment-{resolved_order_id[:12]}"]
 
         # 7. Assemble final output
         output: dict[str, Any] = {
@@ -137,7 +166,7 @@ class VerifierAgent:
                 "item_ids": order_findings.item_ids or [f"item_{resolved_order_id[:8]}"],
                 "seller_ids": order_findings.seller_ids or [f"seller_{resolved_order_id[:8]}"],
                 "payment_references": payment_refs,
-                "shipment_ids": [f"ship_{resolved_order_id[:12]}"],
+                "shipment_ids": shipment_ids,
             },
             "claim_assessments": claim_assessments,
             "entity_resolution": {
