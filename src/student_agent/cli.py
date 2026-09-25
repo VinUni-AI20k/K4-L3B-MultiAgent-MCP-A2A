@@ -27,6 +27,17 @@ async def _show_tools(root: Path) -> None:
             print(tool)
 
 
+async def _dump_tools(root: Path) -> None:
+    settings = Settings.load(root)
+    contracts = Contracts(root / "contracts" / "schemas")
+    async with connect_gateway(settings.mcp_endpoint, settings.team_api_key, contracts) as gateway:
+        tools = await gateway.describe_tools()
+    target = root / "docs" / "mcp-tools.json"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(json.dumps(tools, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    print(f"OK: {len(tools)} tools -> {target}")
+
+
 async def _run(root: Path) -> None:
     settings = Settings.load(root)
     case_set = load_case_set(root)
@@ -66,6 +77,7 @@ def parser() -> argparse.ArgumentParser:
     commands = result.add_subparsers(dest="command", required=True)
     commands.add_parser("validate-inputs", help="validate case-set.json and all 100 inputs")
     commands.add_parser("mcp-tools", help="authenticate and list discovered MCP tools")
+    commands.add_parser("mcp-schema", help="save MCP tool descriptions and input schemas")
     commands.add_parser("run", help="run the implemented workflow for all cases")
     commands.add_parser("validate", help="validate outputs and observable trace")
     package = commands.add_parser("package", help="validate and build the submission ZIP")
@@ -85,6 +97,8 @@ def main() -> None:
             )
         elif args.command == "mcp-tools":
             asyncio.run(_show_tools(root))
+        elif args.command == "mcp-schema":
+            asyncio.run(_dump_tools(root))
         elif args.command == "run":
             asyncio.run(_run(root))
         elif args.command == "validate":
