@@ -320,18 +320,367 @@ def merge_worker_results(*results: dict[str, Any]) -> dict[str, Any]:
     return merged
 
 
+# =============================================================================
+# TASK 3: Logistics Worker
+# =============================================================================
+
+
+async def logistics_worker(
+    order_ids: tuple[str, ...], context: InvestigationContext
+) -> dict[str, Any]:
+    """Analyze shipment status and determine delivery verdict.
+
+    Verdict options:
+    - on_time: Giao đúng hạn
+    - seller_delay: Seller gửi trễ
+    - logistics_delay: logistics giao trễ
+    - lost: Mất hàng
+    - returned: Hoàn hàng
+    - conflicting: Dữ liệu mâu thuẫn
+    - insufficient_evidence: Không đủ bằng chứng
+    """
+    context.trace.emit(
+        case_id=context.case_id,
+        event_type="task_assigned",
+        actor="coordinator",
+        target="logistics-worker",
+        decision_code="ANALYZE_SHIPMENT",
+        attributes={"order_count": len(order_ids)},
+    )
+
+    all_orders: list[dict[str, Any]] = []
+    all_shipments: list[dict[str, Any]] = []
+    late_seller_ids: set[str] = set()
+    has_data = False
+
+    for order_id in order_ids:
+        # Get order details
+        try:
+            order_evidence = await context.call(
+                "logistics-worker", "get_order", order_id=order_id
+            )
+            order_data = _evidence_data(order_evidence)
+            if order_data:
+                all_orders.append(order_data)
+                has_data = True
+        except (RuntimeError, ValueError):
+            pass
+
+        # Get order items (for seller info)
+        try:
+            items_evidence = await context.call(
+                "logistics-worker", "get_order_items", order_id=order_id
+            )
+            items_data = _evidence_data(items_evidence)
+            if items_data:
+                # Merge seller info into orders
+                for order in all_orders:
+                    if order.get("order_id") == order_id:
+                        if "seller_id" not in order and "seller_id" in items_data:
+                            order["seller_id"] = items_data.get("seller_id")
+                        break
+        except (RuntimeError, ValueError):
+            pass
+
+        # Get shipment details
+        try:
+            shipment_evidence = await context.call(
+                "logistics-worker", "get_shipment", order_id=order_id
+            )
+            shipment_data = _evidence_data(shipment_evidence)
+            if shipment_data:
+                all_shipments.append(shipment_data)
+                has_data = True
+        except (RuntimeError, ValueError):
+            pass
+
+    if not has_data:
+        context.trace.emit(
+            case_id=context.case_id,
+            event_type="handoff",
+            actor="logistics-worker",
+            target="coordinator",
+            decision_code="SHIPMENT_INSUFFICIENT_EVIDENCE",
+            evidence_refs=[],
+        )
+        return {
+            "verdict": "insufficient_evidence",
+            "late_seller_ids": [],
+            "timeline_complete": False,
+        }
+
+    # Determine verdict
+    verdict = _determine_shipment_verdict(all_orders, all_shipments)
+
+    # Extract late sellers
+    late_seller_ids = _extract_late_sellers(all_orders, all_shipments)
+
+    # Check timeline completeness
+    timeline_complete = _check_timeline_complete(all_orders, all_shipments)
+
+    # Check for conflicts
+    if _has_shipment_conflicts(all_orders, all_shipments):
+        verdict = "conflicting"
+
+    context.trace.emit(
+        case_id=context.case_id,
+        event_type="handoff",
+        actor="logistics-worker",
+        target="coordinator",
+        decision_code=f"SHIPMENT_{verdict.upper()}",
+        evidence_refs=context.evidence_refs[-5:] if context.evidence_refs else [],
+        attributes={
+            "verdict": verdict,
+            "late_seller_count": len(late_seller_ids),
+            "timeline_complete": timeline_complete,
+        },
+    )
+
+    return {
+        "verdict": verdict,
+        "late_seller_ids": list(late_seller_ids),
+        "timeline_complete": timeline_complete,
+    }
+
+
+def _determine_shipment_verdict(
+    orders: list[dict[str, Any]], shipments: list[dict[str, Any]]
+) -> str:
+    """Determine shipment verdict based on order and shipment data."""
+    if not orders and not shipments:
+        return "insufficient_evidence"
+
+    # Check for returned status
+    for shipment in shipments:
+        status = str(shipment.get("status", "")).casefold()
+        shipping_status = str(shipment.get("shipping_status", "")).casefold()
+        if "return" in status or "return" in shipping_status:
+            return "returned"
+
+    # Check for lost shipment
+    for shipment in shipments:
+        status = str(shipment.get("status", "")).casefold()
+        shipping_status = str(shipment.get("shipping_status", "")).casefold()
+        delivery_status = str(shipment.get("delivery_status", "")).casefold()
+        if "lost" in status or "lost" in shipping_status or "lost" in delivery_status:
+            return "lost"
+
+    # Analyze delivery timing
+    on_time_count = 0
+    late_count = 0
+    unknown_count = 0
+
+    for shipment in shipments:
+        promised = _parse_date(
+            shipment.get("shipping_limit_date")
+            or shipment.get("promise_date")
+            or shipment.get("estimated_delivery_date")
+        )
+        delivered = _parse_date(
+            shipment.get("delivery_date")
+            or shipment.get("actual_delivery_date")
+            or shipment.get("delivered_date")
+        )
+
+        if promised and delivered:
+            if delivered <= promised:
+                on_time_count += 1
+            else:
+                late_count += 1
+        elif promised and not delivered:
+            status = str(shipment.get("status", "")).casefold()
+            if "delivered" not in status and "complete" not in status:
+                # Still pending, but check if past promise date
+                unknown_count += 1
+            else:
+                late_count += 1
+        else:
+            unknown_count += 1
+
+    # Fallback to order status if no shipment data
+    if not shipments and orders:
+        for order in orders:
+            status = str(order.get("order_status", "")).casefold()
+            if "delivered" in status:
+                on_time_count += 1
+            elif "shipped" in status or "processing" in status:
+                unknown_count += 1
+
+    total = on_time_count + late_count + unknown_count
+    if total == 0:
+        return "insufficient_evidence"
+
+    if late_count > 0 and on_time_count == 0 and unknown_count == 0:
+        return "seller_delay"
+
+    if late_count > 0 and unknown_count == 0:
+        return "logistics_delay"
+
+    if late_count > 0 and unknown_count > 0:
+        return "conflicting"
+
+    if unknown_count > 0 and late_count == 0 and on_time_count == 0:
+        return "insufficient_evidence"
+
+    return "on_time"
+
+
+def _extract_late_sellers(
+    orders: list[dict[str, Any]], shipments: list[dict[str, Any]]
+) -> set[str]:
+    """Extract seller IDs responsible for late delivery."""
+    late_sellers: set[str] = set()
+
+    for shipment in shipments:
+        promised = _parse_date(
+            shipment.get("shipping_limit_date")
+            or shipment.get("promise_date")
+            or shipment.get("estimated_delivery_date")
+        )
+        delivered = _parse_date(
+            shipment.get("delivery_date")
+            or shipment.get("actual_delivery_date")
+            or shipment.get("delivered_date")
+        )
+
+        if promised and delivered and delivered > promised:
+            seller_id = _clean_id(
+                shipment.get("seller_id")
+                or shipment.get("seller")
+            )
+            if seller_id and not str(seller_id).startswith("candidate"):
+                late_sellers.add(seller_id)
+
+    # Also check order data for seller info
+    for order in orders:
+        seller_id = _clean_id(order.get("seller_id") or order.get("seller"))
+        if seller_id and not str(seller_id).startswith("candidate"):
+            # Check if this order had delivery issues
+            status = str(order.get("order_status", "")).casefold()
+            notes = str(
+                order.get("customer_survey_comments", "") + " " + str(order.get("notes", ""))
+            ).casefold()
+            if ("late" in notes or "delay" in notes or "delayed" in notes):
+                late_sellers.add(seller_id)
+
+    return late_sellers
+
+
+def _check_timeline_complete(
+    orders: list[dict[str, Any]], shipments: list[dict[str, Any]]
+) -> bool:
+    """Check if shipment timeline has complete information."""
+    if not shipments and not orders:
+        return False
+
+    complete_count = 0
+    total_items = max(len(shipments), len(orders))
+
+    for shipment in shipments:
+        has_status = bool(shipment.get("status") or shipment.get("shipping_status"))
+        has_delivery = bool(
+            shipment.get("delivery_date")
+            or shipment.get("actual_delivery_date")
+            or shipment.get("delivered_date")
+        )
+        has_promise = bool(
+            shipment.get("shipping_limit_date")
+            or shipment.get("promise_date")
+            or shipment.get("estimated_delivery_date")
+        )
+
+        if has_status and (has_delivery or has_promise):
+            complete_count += 1
+
+    # Check orders if no shipment data
+    if not shipments:
+        for order in orders:
+            has_status = bool(order.get("order_status"))
+            has_date = bool(
+                order.get("order_purchase_timestamp")
+                or order.get("order_delivered_customer_date")
+            )
+            if has_status and has_date:
+                complete_count += 1
+
+    if total_items == 0:
+        return False
+
+    return complete_count >= total_items * 0.5
+
+
+def _has_shipment_conflicts(
+    orders: list[dict[str, Any]], shipments: list[dict[str, Any]]
+) -> bool:
+    """Check for conflicting evidence in shipment data."""
+    if len(shipments) < 2:
+        return False
+
+    delivery_dates: set[str] = set()
+    for shipment in shipments:
+        delivered = _parse_date(
+            shipment.get("delivery_date")
+            or shipment.get("actual_delivery_date")
+            or shipment.get("delivered_date")
+        )
+        if delivered:
+            delivery_dates.add(str(delivered.date()))
+
+    statuses: set[str] = set()
+    for shipment in shipments:
+        status = str(shipment.get("status", "")).casefold()
+        if status:
+            statuses.add(status)
+
+    # Multiple different delivery dates or many conflicting statuses indicate conflict
+    if len(delivery_dates) > 1 or len(statuses) > 2:
+        return True
+
+    return False
+
+
+def _parse_date(value: Any) -> Any:
+    """Parse date string to comparable datetime object."""
+    if value is None:
+        return None
+    if hasattr(value, "strftime"):
+        return value
+    if isinstance(value, str) and value:
+        for fmt in (
+            "%Y-%m-%d",
+            "%Y-%m-%dT%H:%M:%S",
+            "%Y-%m-%d %H:%M:%S",
+            "%Y-%m-%dT%H:%M:%SZ",
+        ):
+            try:
+                from datetime import datetime
+
+                return datetime.strptime(value[:19], fmt)
+            except ValueError:
+                continue
+    return None
+
+
 async def solve_case(
     case: dict[str, Any], gateway: EvidenceGateway, trace: TraceWriter
 ) -> dict[str, Any]:
-    """Run coordinator stages implemented by Tasks 1 and 2.
+    """Run coordinator stages: Entity Resolution + Logistics Worker.
 
-    Tasks 3-7 own specialist analysis and the final schema output. Failing
-    explicitly avoids emitting a plausible-looking answer without evidence.
+    Tasks 4-7 must build remaining specialist analyses and final schema output.
     """
 
     plan = build_case_plan(case)
     context = InvestigationContext(plan.case_id, gateway, trace)
-    await resolve_entity(plan, context)
+
+    # Task 1: Entity Resolution
+    entity_res = await resolve_entity(plan, context)
+
+    # Task 3: Logistics Worker
+    shipment_analysis = {"verdict": "insufficient_evidence", "late_seller_ids": [], "timeline_complete": False}
+    if "logistics-worker" in plan.workers and entity_res.resolved_order_ids:
+        shipment_analysis = await logistics_worker(entity_res.resolved_order_ids, context)
+
+    # Tasks 4-7 must build: financial_worker, policy_worker, conflict_resolver, verifier, final output
     for worker in plan.workers[1:]:
         trace.emit(
             case_id=plan.case_id,
@@ -340,4 +689,4 @@ async def solve_case(
             target=worker,
             decision_code=f"INVESTIGATE_{re.sub(r'[^A-Z0-9]+', '_', plan.topic.upper())}",
         )
-    raise NotImplementedError("Tasks 3-7 must build specialist analyses and final output")
+    raise NotImplementedError("Tasks 4-7 must build specialist analyses and final output")
