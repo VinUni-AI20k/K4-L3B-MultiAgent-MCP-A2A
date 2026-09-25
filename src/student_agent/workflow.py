@@ -118,6 +118,13 @@ async def coordinate(
             output["schema_version"] = "day09-l3b-output-v2"
             output["case_id"] = case_id
             output.update(deepcopy(entity.payload))
+            # A policy agent must only return evidence it consumed itself for A2A
+            # correlation. The final submission, however, includes every ref used
+            # by entity and specialist agents in this case.
+            all_refs = list(entity.evidence_refs) + list(policy.evidence_refs)
+            for finding in findings.values():
+                all_refs.extend(finding["evidence_refs"])
+            output["evidence_refs"] = list(dict.fromkeys(all_refs))
             trace.emit(
                 case_id=case_id, event_type="task_assigned", actor="coordinator", target="verifier"
             )
