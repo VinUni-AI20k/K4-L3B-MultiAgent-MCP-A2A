@@ -25,10 +25,10 @@ Task 3: Logistics Worker (trong workflow)
 
 Task 4: Financial Worker (trong workflow)
 
-- [ ] Gọi get_payment, get_refund
-- [ ] Deterministic calculation: số tiền hoàn
-- [ ] Kiểm tra refund_pending, refund_failed
-- [ ] Output: payment_analysis, financial_resolution
+- [x] Gọi get_payment, get_refund
+- [x] Deterministic calculation: số tiền hoàn
+- [x] Kiểm tra refund_pending, refund_failed
+- [x] Output: payment_analysis, financial_resolution
 
 Task 5: Policy Worker (trong workflow)
 
