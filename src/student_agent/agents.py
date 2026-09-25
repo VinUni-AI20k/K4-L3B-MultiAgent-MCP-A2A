@@ -64,17 +64,20 @@ class InvestigationContext:
         refs: list[str] = []
         topic_lower = topic.lower()
 
-        if any(w in topic_lower for w in ("late", "ship", "deliver", "logistics", "carrier")):
-            for d in ("shipment", "order"):
+        if "late_delivery_seller" in topic_lower:
+            for d in ("seller", "item", "shipment", "order"):
+                refs.extend(self.evidence_by_domain.get(d, []))
+        elif "late_delivery_logistics" in topic_lower or any(w in topic_lower for w in ("late", "ship", "deliver", "logistics", "carrier")):
+            for d in ("shipment", "order", "item"):
                 refs.extend(self.evidence_by_domain.get(d, []))
         elif any(w in topic_lower for w in ("refund", "charge", "pay", "split", "mismatch")):
-            for d in ("payment", "refund", "policy", "order"):
+            for d in ("payment", "refund", "policy", "order", "item"):
                 refs.extend(self.evidence_by_domain.get(d, []))
         elif any(w in topic_lower for w in ("cancel", "unavail")):
-            for d in ("order", "seller", "policy"):
+            for d in ("order", "seller", "item", "product", "policy"):
                 refs.extend(self.evidence_by_domain.get(d, []))
         else:
-            for d in ("policy", "order"):
+            for d in ("policy", "order", "item"):
                 refs.extend(self.evidence_by_domain.get(d, []))
 
         deduped = list(dict.fromkeys(refs))
@@ -193,7 +196,7 @@ class EntityAgent:
 
 
 class OrderProductAgent:
-    """Agent responsible for Order, Items, Product Context and Seller identification."""
+    """Agent responsible for Order, Items, Product Context, Seller identification and Financial Aggregation."""
 
     def __init__(self, ctx: InvestigationContext) -> None:
         self.ctx = ctx
@@ -210,49 +213,166 @@ class OrderProductAgent:
 
         item_ids: list[str] = []
         seller_ids: list[str] = []
+        product_ids: list[str] = []
+        items_data: list[dict[str, Any]] = []
+        product_categories: list[str] = []
+        seller_locations: dict[str, dict[str, str]] = {}
+        seller_financials: dict[str, dict[str, Any]] = {}
+        shipping_deadlines: list[dict[str, str]] = []
+
+        total_items_price = 0.0
+        total_freight_value = 0.0
+
         scope = self.ctx.case.get("investigation_scope", {})
 
         for order_id in resolved_order_ids:
-            # Order items
+            # 1. Order items investigation
             items_evidence = await self.ctx.call_tool_cached(
                 "get_order_items", self.actor, order_id=order_id
             )
             if items_evidence and items_evidence.get("data"):
-                for itm in items_evidence["data"]:
+                raw_items = items_evidence["data"]
+                if isinstance(raw_items, dict):
+                    raw_items = [raw_items]
+                for itm in raw_items:
+                    if not isinstance(itm, dict):
+                        continue
                     iid = itm.get("order_item_id")
-                    if iid and iid not in item_ids:
-                        item_ids.append(iid)
+                    if iid and str(iid) not in item_ids:
+                        item_ids.append(str(iid))
+
                     sid = itm.get("seller_id")
                     if sid and sid not in seller_ids:
                         seller_ids.append(sid)
 
-            # Sellers
+                    pid = itm.get("product_id")
+                    if pid and pid not in product_ids:
+                        product_ids.append(pid)
+
+                    # Extract price and freight
+                    try:
+                        price = float(itm.get("price", 0.0) or 0.0)
+                    except (ValueError, TypeError):
+                        price = 0.0
+
+                    try:
+                        freight = float(itm.get("freight_value", 0.0) or 0.0)
+                    except (ValueError, TypeError):
+                        freight = 0.0
+
+                    total_items_price += price
+                    total_freight_value += freight
+
+                    # Seller financial mapping
+                    if sid:
+                        if sid not in seller_financials:
+                            seller_financials[sid] = {
+                                "items": [],
+                                "item_price": 0.0,
+                                "freight": 0.0,
+                                "total": 0.0,
+                            }
+                        seller_financials[sid]["items"].append(str(iid) if iid else pid)
+                        seller_financials[sid]["item_price"] = round(
+                            seller_financials[sid]["item_price"] + price, 2
+                        )
+                        seller_financials[sid]["freight"] = round(
+                            seller_financials[sid]["freight"] + freight, 2
+                        )
+                        seller_financials[sid]["total"] = round(
+                            seller_financials[sid]["item_price"]
+                            + seller_financials[sid]["freight"],
+                            2,
+                        )
+
+                    # Shipping limit date tracking
+                    deadline = itm.get("shipping_limit_date")
+                    if deadline:
+                        shipping_deadlines.append({
+                            "order_item_id": str(iid) if iid else "",
+                            "seller_id": sid or "",
+                            "shipping_limit_date": str(deadline),
+                        })
+
+                    items_data.append(itm)
+
+            # 2. Sellers profile and location verification
             sellers_evidence = await self.ctx.call_tool_cached(
                 "get_sellers", self.actor, order_id=order_id
             )
             if sellers_evidence and sellers_evidence.get("data"):
-                for s in sellers_evidence["data"]:
+                raw_sellers = sellers_evidence["data"]
+                if isinstance(raw_sellers, dict):
+                    raw_sellers = [raw_sellers]
+                for s in raw_sellers:
+                    if not isinstance(s, dict):
+                        continue
                     sid = s.get("seller_id")
                     if sid and sid not in seller_ids:
                         seller_ids.append(sid)
+                    if sid:
+                        seller_locations[sid] = {
+                            "city": s.get("seller_city", ""),
+                            "state": s.get("seller_state", ""),
+                            "zip_code_prefix": str(s.get("seller_zip_code_prefix", "")),
+                        }
 
-            # Product context (only if specifically required by scope)
+            # 3. Product context investigation (when in scope)
             if scope.get("include_product_context", False):
-                await self.ctx.call_tool_cached(
+                product_ev = await self.ctx.call_tool_cached(
                     "get_product_context", self.actor, order_id=order_id
                 )
+                if product_ev and product_ev.get("data"):
+                    raw_prods = product_ev["data"]
+                    if isinstance(raw_prods, dict):
+                        raw_prods = [raw_prods]
+                    for p in raw_prods:
+                        if not isinstance(p, dict):
+                            continue
+                        pid = p.get("product_id")
+                        if pid and pid not in product_ids:
+                            product_ids.append(pid)
+                        cat = p.get("product_category_name")
+                        if cat and cat not in product_categories:
+                            product_categories.append(cat)
+
+        total_items_price = round(total_items_price, 2)
+        total_freight_value = round(total_freight_value, 2)
+        total_order_value = round(total_items_price + total_freight_value, 2)
+        is_multi_seller = len(seller_ids) > 1
 
         self.ctx.trace.emit(
             case_id=self.ctx.case_id,
             event_type="handoff",
             actor=self.actor,
             target="coordinator",
-            attributes={"items_count": len(item_ids), "sellers_count": len(seller_ids)},
+            attributes={
+                "items_count": len(item_ids),
+                "sellers_count": len(seller_ids),
+                "products_count": len(product_ids),
+                "total_order_value": total_order_value,
+                "is_multi_seller": is_multi_seller,
+            },
         )
 
         return {
             "item_ids": item_ids,
             "seller_ids": seller_ids,
+            "product_ids": product_ids,
+            "items": items_data,
+            "total_items_price": total_items_price,
+            "total_freight_value": total_freight_value,
+            "total_order_value": total_order_value,
+            "seller_financials": seller_financials,
+            "seller_locations": seller_locations,
+            "product_categories": product_categories,
+            "shipping_deadlines": shipping_deadlines,
+            "order_product_analysis": {
+                "items_count": len(item_ids),
+                "distinct_sellers_count": len(seller_ids),
+                "is_multi_seller": is_multi_seller,
+                "has_shipping_deadlines": bool(shipping_deadlines),
+            },
         }
 
 
@@ -539,6 +659,7 @@ class PolicyConflictAgent:
         shipment_res: dict[str, Any],
         payment_res: dict[str, Any],
         seller_ids: list[str],
+        order_res: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         self.ctx.trace.emit(
             case_id=self.ctx.case_id,
@@ -705,6 +826,15 @@ class PolicyConflictAgent:
             refund_lines = []
         else:
             final_refund = min(policy_refund_brl, refundable_total) if refundable_total > 0 else policy_refund_brl
+
+            # Corroborate with OrderProductAgent seller financials if available
+            if order_res and isinstance(order_res, dict):
+                seller_fin = order_res.get("seller_financials", {})
+                if primary_issue == "late_delivery_seller" and actual_seller in seller_fin:
+                    seller_freight = seller_fin[actual_seller].get("freight", 0.0)
+                    if seller_freight > 0:
+                        final_refund = min(seller_freight, refundable_total) if refundable_total > 0 else seller_freight
+
             final_refund = round(final_refund, 2)
 
             if primary_issue in ("late_delivery_seller", "unavailable_order_paid"):
