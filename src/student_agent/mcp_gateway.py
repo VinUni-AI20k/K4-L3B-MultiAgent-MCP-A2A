@@ -71,6 +71,15 @@ async def connect_gateway(
     endpoint: str, team_api_key: str, contracts: Contracts
 ) -> AsyncIterator[EvidenceGateway]:
     headers = {"Authorization": f"Bearer {team_api_key}"}
+    try:
+        from urllib.parse import urlparse
+        parsed = urlparse(endpoint)
+        base_api = f"{parsed.scheme}://{parsed.netloc}"
+        async with httpx2.AsyncClient(headers=headers, timeout=30.0) as init_client:
+            await init_client.post(f"{base_api}/api/v2/runs", json={"variant_id": VARIANT_ID})
+    except Exception:
+        pass
+
     timeout = httpx2.Timeout(300.0, connect=30.0, write=30.0, pool=30.0)
     async with (
         httpx2.AsyncClient(headers=headers, timeout=timeout) as http_client,
