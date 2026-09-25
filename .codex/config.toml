@@ -1,0 +1,29 @@
+# OpenAI Codex Project-Level Configuration for K4-L3B-MultiAgent-MCP-A2A
+[agents]
+enabled = true
+default_subagent_model = "gpt-5.6-luna"
+default_subagent_reasoning_effort = "low"
+
+[agents.multiagent-architect]
+description = "Multi-agent system architect. Designs coordinator-specialist flows, A2A protocols, entity resolution, and conflict resolution using multiagent-a2a-orchestration and google-adk."
+config_file = "agents/multiagent-architect.toml"
+
+[agents.mcp-specialist]
+description = "MCP integration specialist. Implements EvidenceGateway, handles streamable HTTP MCP connections, manages evidence_ref tokens, and optimizes tool efficiency."
+config_file = "agents/mcp-specialist.toml"
+
+[agents.gemini-integrator]
+description = "Gemini model integration specialist. Manages google-genai SDK, structured JSON outputs with Pydantic, function declarations, and thinking configurations."
+config_file = "agents/gemini-integrator.toml"
+
+[agents.benchmark-evaluator]
+description = "AI agent benchmark and calibration evaluator. Analyzes accuracy, evidence provenance, schema compliance, ECE calibration, and tool efficiency using benchmark-ai-agent."
+config_file = "agents/benchmark-evaluator.toml"
+
+[agents.tester]
+description = "Testing and QA specialist. Writes async pytest suites, mocks MCP sessions, verifies JSON schemas, and drives 100% test coverage using tdd and python-testing-patterns."
+config_file = "agents/tester.toml"
+
+[agents.git-operator]
+description = "Git operations specialist. Manages branch rebasing, linear history, and worktree isolation using git-rebase-patterns and using-git-worktrees."
+config_file = "agents/git-operator.toml"
