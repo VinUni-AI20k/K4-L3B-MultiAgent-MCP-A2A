@@ -84,6 +84,22 @@ The system implements a hierarchical Multi-Agent architecture using the **Google
 - **Cross-Domain Evidence Mapping**:
   - `get_evidence_for_topic` dynamically incorporates `item`, `product`, and `seller` evidence into respective claims (`late_delivery_seller`, `canceled_order_paid`, `unavailable_order_paid`), optimizing F1 evidence coverage.
 
+### 3.1. Order & Product Intelligence và Financial Grounding
+
+- **Tổng hợp tài chính mặt hàng (Item Financial Reconciliation)**:
+  - `OrderProductAgent` phân tích từng mục trong `get_order_items` để tính toán:
+    - `total_items_price = sum(item.price)`
+    - `total_freight_value = sum(item.freight_value)`
+    - `total_order_value = total_items_price + total_freight_value`
+  - Đảm bảo tính toán độc lập và cung cấp dữ liệu cơ sở cho `PolicyConflictAgent` và `PaymentRefundAgent` đối soát chênh lệch thu phí (`capture_mismatch`) hoặc trùng lặp thu phí (`duplicate_charge`).
+- **Phân tách trách nhiệm đa người bán (Multi-Seller Disaggregation)**:
+  - Thu thập ánh xạ `seller_financials`: `{seller_id: {items: [...], item_price: float, freight: float, total: float}}`.
+  - Giúp `PolicyConflictAgent` quy kết chính xác số tiền bồi hoàn cước (`freight_delay`) của đúng người bán chậm trễ giao hàng thay vì sử dụng hằng số tĩnh.
+- **Theo dõi hạn giao hàng người bán (Seller Shipping Deadlines)**:
+  - Trích xuất `shipping_limit_date` của từng sản phẩm để hỗ trợ `ShipmentAgent` xác minh trách nhiệm giao hàng trễ là do người bán bàn giao chậm hay do đơn vị vận chuyển giao trễ.
+- **Bao phủ bằng chứng đa miền (Cross-Domain Evidence Mapping)**:
+  - Cập nhật bộ chọn bằng chứng `get_evidence_for_topic` tích hợp các miền `item`, `product`, và `seller` vào các khiếu nại liên quan (`late_delivery_seller`, `canceled_order_paid`, `unavailable_order_paid`), tối ưu hóa điểm số bao phủ F1 bằng chứng (`evidence` component).
+
 ---
 
 ## 4. Evidence Lifecycle & Conflict Resolution
