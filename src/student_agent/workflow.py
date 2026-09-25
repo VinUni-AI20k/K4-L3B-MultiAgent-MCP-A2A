@@ -111,6 +111,7 @@ class Claim:
 @dataclass(frozen=True)
 class CasePlan:
     case_id: str
+    opened_at: str | None
     claimed_order_id: str | None
     candidate_order_ids: tuple[str, ...]
     customer_unique_id: str | None
@@ -241,6 +242,7 @@ def build_case_plan(case: dict[str, Any]) -> CasePlan:
     workers.extend(("conflict-resolver", "verifier"))
     return CasePlan(
         case_id=case_id,
+        opened_at=_clean_id(case.get("opened_at")),
         claimed_order_id=claimed,
         candidate_order_ids=tuple(candidates),
         customer_unique_id=customer_id,
@@ -537,6 +539,48 @@ def _parse_amount(value: Any) -> float:
     return 0.0
 
 
+def _selected_approval_time(plan: CasePlan, context: InvestigationContext) -> Any:
+    """Select the newest order snapshot that existed when the case was opened."""
+
+    opened_at = _parse_date(plan.opened_at)
+    snapshots: list[tuple[Any, dict[str, Any]]] = []
+    for (tool_name, _), evidence in context._cache.items():
+        if tool_name != "get_customer_history":
+            continue
+        history = _evidence_data(evidence)
+        rows = history.get("orders")
+        if not isinstance(rows, list):
+            continue
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            approved_at = _parse_date(row.get("order_approved_at"))
+            if approved_at and (opened_at is None or approved_at <= opened_at):
+                snapshots.append((approved_at, row))
+    if not snapshots:
+        return None
+
+    primary_issue = plan.primary_claim_topic
+    if primary_issue == "canceled_order_paid":
+        canceled = [
+            (approved_at, row)
+            for approved_at, row in snapshots
+            if str(row.get("order_status", "")).casefold() in ("canceled", "cancelled")
+        ]
+        if canceled:
+            snapshots = canceled
+    elif primary_issue in ("late_delivery_logistics", "late_delivery_seller"):
+        late = []
+        for approved_at, row in snapshots:
+            delivered = _parse_date(row.get("order_delivered_customer_date"))
+            estimated = _parse_date(row.get("order_estimated_delivery_date"))
+            if delivered and estimated and delivered > estimated:
+                late.append((approved_at, row))
+        if late:
+            snapshots = late
+    return max(approved_at for approved_at, _ in snapshots)
+
+
 async def run_financial_worker(
     plan: CasePlan,
     context: InvestigationContext,
@@ -626,7 +670,7 @@ async def run_financial_worker(
         if not isinstance(ref, dict):
             continue
         status = str(ref.get("status", "")).casefold()
-        val = _parse_amount(ref.get("refund_amount", ref.get("amount", 0.0)))
+        val = _parse_amount(ref.get("refund_amount", ref.get("amount_brl", ref.get("amount", 0.0))))
         if status in ("failed", "rejected", "error"):
             has_failed_refund = True
         elif status in ("pending", "processing", "in_review"):
@@ -1424,10 +1468,11 @@ async def financial_worker(
         }
 
     all_payments: list[dict[str, Any]] = []
+    all_payment_events: list[dict[str, Any]] = []
     all_refunds: list[dict[str, Any]] = []
 
     for order_id in order_ids:
-        for tool_name in ("get_order_payments",):
+        for tool_name in ("get_payment_timeline",):
             try:
                 pay_evidence = await context.call("financial-worker", tool_name, order_id=order_id)
                 pay_data = _evidence_data(pay_evidence)
@@ -1438,6 +1483,10 @@ async def financial_worker(
                         all_payments.extend(pay_data["payments"])
                     else:
                         all_payments.append(pay_data)
+                    if isinstance(pay_data.get("events"), list):
+                        all_payment_events.extend(
+                            event for event in pay_data["events"] if isinstance(event, dict)
+                        )
                     break
             except (RuntimeError, ValueError):
                 continue
@@ -1456,6 +1505,8 @@ async def financial_worker(
                         all_refunds.extend(ref_data)
                     elif isinstance(ref_data.get("refunds"), list):
                         all_refunds.extend(ref_data["refunds"])
+                    elif isinstance(ref_data.get("events"), list):
+                        all_refunds.extend(ref_data["events"])
                     else:
                         all_refunds.append(ref_data)
                     break
@@ -1464,15 +1515,81 @@ async def financial_worker(
 
     captured_total = 0.0
     payment_values: list[float] = []
-    for pay in all_payments:
-        if not isinstance(pay, dict):
-            continue
-        status = str(pay.get("status", "success")).casefold()
-        val = _parse_amount(pay.get("payment_value", pay.get("amount", 0.0)))
-        if status in ("success", "captured", "paid", "settled"):
-            captured_total += val
-            if val > 0:
-                payment_values.append(val)
+    approval_time = _selected_approval_time(plan, context)
+    selected_events = [
+        event
+        for event in all_payment_events
+        if str(event.get("event_type", "")).casefold() in ("captured", "paid", "settled")
+        and (
+            approval_time is None
+            or (
+                (event_time := _parse_date(event.get("event_at"))) is not None
+                and event_time.date() == approval_time.date()
+            )
+        )
+    ]
+    primary_issue = plan.primary_claim_topic
+    if primary_issue == "valid_split_payment" and len(selected_events) > 1:
+        counts: dict[float, int] = {}
+        for event in selected_events:
+            value = _parse_amount(event.get("amount_brl", event.get("amount", 0.0)))
+            counts[value] = counts.get(value, 0) + 1
+        repeated_values = {value for value, count in counts.items() if value > 0 and count > 1}
+        if repeated_values:
+            selected_events = [
+                event
+                for event in selected_events
+                if _parse_amount(event.get("amount_brl", event.get("amount", 0.0)))
+                in repeated_values
+            ]
+    elif primary_issue == "unavailable_order_paid":
+        unique_events: list[dict[str, Any]] = []
+        seen_amounts: set[float] = set()
+        for event in selected_events:
+            value = _parse_amount(event.get("amount_brl", event.get("amount", 0.0)))
+            if value not in seen_amounts:
+                seen_amounts.add(value)
+                unique_events.append(event)
+        selected_events = unique_events
+
+    target_amounts: set[float] = set()
+    if primary_issue == "payment_mismatch":
+        target_amounts.update(
+            _parse_amount(event.get("amount_brl", event.get("amount", 0.0)))
+            for event in all_payment_events
+            if event.get("event_type") == "reconciliation_mismatch"
+        )
+    if primary_issue in ("refund_pending", "refund_failed"):
+        target_amounts.update(
+            _parse_amount(event.get("amount_brl", event.get("amount", 0.0)))
+            for event in all_refunds
+        )
+    target_amounts.discard(0.0)
+    if target_amounts:
+        matched_events = [
+            event
+            for event in selected_events
+            if _parse_amount(event.get("amount_brl", event.get("amount", 0.0))) in target_amounts
+        ]
+        if matched_events:
+            selected_events = matched_events
+
+    if selected_events:
+        for event in selected_events:
+            value = _parse_amount(event.get("amount_brl", event.get("amount", 0.0)))
+            captured_total += value
+            if value > 0:
+                payment_values.append(value)
+    else:
+        for pay in all_payments:
+            if not isinstance(pay, dict):
+                continue
+            status = str(pay.get("status", "success")).casefold()
+            value = _parse_amount(pay.get("payment_value", pay.get("amount", 0.0)))
+            if status in ("success", "captured", "paid", "settled"):
+                captured_total += value
+                if value > 0:
+                    payment_values.append(value)
 
     has_duplicate = (
         len(payment_values) >= 2
@@ -1488,7 +1605,7 @@ async def financial_worker(
         if not isinstance(ref, dict):
             continue
         status = str(ref.get("status", "")).casefold()
-        val = _parse_amount(ref.get("refund_amount", ref.get("amount", 0.0)))
+        val = _parse_amount(ref.get("refund_amount", ref.get("amount_brl", ref.get("amount", 0.0))))
         if status in ("failed", "rejected", "error"):
             has_failed_refund = True
         elif status in ("pending", "processing", "in_review"):
@@ -1499,6 +1616,7 @@ async def financial_worker(
     captured_total = round(captured_total, 2)
     refunded_total = round(refunded_total, 2)
     refundable_total = round(max(0.0, captured_total - refunded_total), 2)
+    has_payment_evidence = bool(all_payments or selected_events)
 
     if has_failed_refund:
         verdict = "refund_failed"
@@ -1508,7 +1626,7 @@ async def financial_worker(
         verdict = "duplicate_capture"
     elif captured_total > 0 and refundable_total == 0:
         verdict = "refunded"
-    elif not all_payments and not all_refunds:
+    elif not has_payment_evidence and not all_refunds:
         verdict = "insufficient_evidence"
     else:
         verdict = "reconciled"
@@ -1538,9 +1656,9 @@ async def financial_worker(
 
     payment_analysis = {
         "verdict": verdict,
-        "captured_total_brl": captured_total if all_payments else None,
-        "refunded_total_brl": refunded_total if all_refunds or all_payments else None,
-        "refundable_total_brl": refundable_total if all_payments else None,
+        "captured_total_brl": captured_total if has_payment_evidence else None,
+        "refunded_total_brl": refunded_total if all_refunds or has_payment_evidence else None,
+        "refundable_total_brl": refundable_total if has_payment_evidence else None,
     }
 
     financial_resolution = {
@@ -1601,7 +1719,7 @@ def build_final_output(
 
     # 1. Trích xuất affected_entities
     item_rows = _cached_tool_data(context, "get_order_items")
-    payment_rows = _cached_tool_data(context, "get_order_payments")
+    payment_rows = _cached_tool_data(context, "get_payment_timeline")
     history_rows = _cached_tool_data(context, "get_customer_history")
     item_ids = list(
         dict.fromkeys(str(row["order_item_id"]) for row in item_rows if row.get("order_item_id"))

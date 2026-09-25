@@ -313,6 +313,7 @@ def test_equal_payment_values_only_mean_duplicate_for_duplicate_claim(
     plan = build_case_plan(
         {
             "case_id": "CASE_PAYMENT",
+            "opened_at": "2018-02-02T09:00:00-03:00",
             "customer_request": {
                 "message": "Kiểm tra payment",
                 "claims": [{"claim_id": "claim-a", "topic": claim_topic}],
@@ -322,18 +323,38 @@ def test_equal_payment_values_only_mean_duplicate_for_duplicate_claim(
 
     class PaymentGateway:
         async def call(self, tool_name: str, *, case_id: str, **arguments: str):
-            assert tool_name == "get_order_payments"
+            assert tool_name == "get_payment_timeline"
             return {
                 "evidence_ref": "ev_" + "p" * 24,
                 "data": {
                     "payments": [
                         {"payment_value": "89.00", "status": "captured"},
                         {"payment_value": "89.00", "status": "captured"},
-                    ]
+                    ],
+                    "events": [
+                        {
+                            "event_at": "2018-01-21T10:00:00-03:00",
+                            "event_type": "captured",
+                            "amount_brl": "89.00",
+                        },
+                        {
+                            "event_at": "2018-01-21T11:00:00-03:00",
+                            "event_type": "captured",
+                            "amount_brl": "89.00",
+                        },
+                    ],
                 },
             }
 
     context = InvestigationContext(plan.case_id, PaymentGateway(), FakeTrace())
+    context._cache[("get_customer_history", ())] = {
+        "data": {
+            "orders": [
+                {"order_approved_at": "2018-01-21T10:00:00-03:00"},
+                {"order_approved_at": "2018-04-10T10:00:00-03:00"},
+            ]
+        }
+    }
     result = asyncio.run(
         financial_worker(
             ("ORDER_1",),
@@ -390,3 +411,59 @@ def test_seller_responsibility_uses_affected_seller() -> None:
     assert output["root_cause_analysis"]["responsible_parties"] == [
         {"party_type": "seller", "party_id": "SELLER_1"}
     ]
+
+
+def test_payment_analysis_selects_snapshot_at_case_open_time() -> None:
+    plan = build_case_plan(
+        {
+            "case_id": "CASE_SPLIT",
+            "opened_at": "2018-02-02T09:00:00-03:00",
+            "customer_request": {
+                "claims": [{"claim_id": "claim-a", "topic": "valid_split_payment"}]
+            },
+        }
+    )
+
+    class TimelineGateway:
+        async def call(self, tool_name: str, *, case_id: str, **arguments: str):
+            assert tool_name == "get_payment_timeline"
+            return {
+                "evidence_ref": "ev_" + "t" * 24,
+                "data": {
+                    "payments": [],
+                    "events": [
+                        {
+                            "event_at": "2018-04-10T10:00:00-03:00",
+                            "event_type": "captured",
+                            "amount_brl": "52.00",
+                        },
+                        {
+                            "event_at": "2018-01-21T10:00:00-03:00",
+                            "event_type": "captured",
+                            "amount_brl": "44.50",
+                        },
+                        {
+                            "event_at": "2018-01-21T11:00:00-03:00",
+                            "event_type": "captured",
+                            "amount_brl": "44.50",
+                        },
+                    ],
+                },
+            }
+
+    context = InvestigationContext(plan.case_id, TimelineGateway(), FakeTrace())
+    context._cache[("get_customer_history", ())] = {
+        "data": {
+            "orders": [
+                {"order_approved_at": "2018-04-10T10:00:00-03:00"},
+                {"order_approved_at": "2018-01-21T10:00:00-03:00"},
+            ]
+        }
+    }
+    result = asyncio.run(financial_worker(("ORDER_1",), plan, context))
+    assert result["payment_analysis"] == {
+        "verdict": "reconciled",
+        "captured_total_brl": 89.0,
+        "refunded_total_brl": 0.0,
+        "refundable_total_brl": 89.0,
+    }
