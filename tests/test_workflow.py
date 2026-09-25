@@ -355,8 +355,8 @@ def test_seller_responsibility_uses_affected_seller() -> None:
     )
     context = InvestigationContext(plan.case_id, FakeGateway({}), FakeTrace())
     context.evidence_refs.append("ev_" + "e" * 24)
-    context._cache[("get_order_items", (("order_id", "ORDER_1"),))] = {
-        "data": {"items": [{"order_item_id": "ITEM_1", "seller_id": "SELLER_1"}]}
+    context._cache[("get_product_context", (("order_id", "ORDER_1"),))] = {
+        "data": {"rows": [{"order_item_id": "ITEM_1", "seller_id": "SELLER_1"}]}
     }
     policy = PolicyAnalysis(
         "eligible",

@@ -764,22 +764,6 @@ async def logistics_worker(
         except (RuntimeError, ValueError):
             pass
 
-        # Get order items (for seller info)
-        try:
-            items_evidence = await context.call(
-                "logistics-worker", "get_order_items", order_id=order_id
-            )
-            items_data = _evidence_data(items_evidence)
-            if items_data:
-                # Merge seller info into orders
-                for order in all_orders:
-                    if order.get("order_id") == order_id:
-                        if "seller_id" not in order and "seller_id" in items_data:
-                            order["seller_id"] = items_data.get("seller_id")
-                        break
-        except (RuntimeError, ValueError):
-            pass
-
         # Get shipment details
         try:
             shipment_evidence = await context.call(
@@ -1588,6 +1572,18 @@ def _cached_tool_data(context: InvestigationContext, tool_name: str) -> list[dic
     return rows
 
 
+def _cached_tool_refs(context: InvestigationContext, *tool_names: str) -> list[str]:
+    """Return audited evidence refs for the requested tools in call order."""
+
+    requested = set(tool_names)
+    refs: list[str] = []
+    for (cached_tool, _), evidence in context._cache.items():
+        evidence_ref = evidence.get("evidence_ref")
+        if cached_tool in requested and isinstance(evidence_ref, str):
+            refs.append(evidence_ref)
+    return list(dict.fromkeys(refs))
+
+
 def build_final_output(
     plan: CasePlan,
     context: InvestigationContext,
@@ -1600,7 +1596,7 @@ def build_final_output(
     """Task 7: Build, calibrate, verify and package the final L3B JSON output."""
 
     # 1. Trích xuất affected_entities
-    item_rows = _cached_tool_data(context, "get_order_items")
+    item_rows = _cached_tool_data(context, "get_product_context")
     payment_rows = _cached_tool_data(context, "get_order_payments")
     history_rows = _cached_tool_data(context, "get_customer_history")
     item_ids = list(
@@ -1616,7 +1612,6 @@ def build_final_output(
             if row.get("order_id") and row.get("payment_sequential")
         )
     )
-    seller_ids = list(shipment_res.get("late_seller_ids", []))
     affected_entities = {
         "order_ids": list(entity_res.resolved_order_ids),
         "item_ids": item_ids,
@@ -1656,7 +1651,6 @@ def build_final_output(
         shipment_res["timeline_complete"] = True
         if primary_issue == "late_delivery_seller":
             shipment_res["late_seller_ids"] = all_seller_ids
-            seller_ids = all_seller_ids
     elif shipment_verdict == "insufficient_evidence":
         shipment_res["verdict"] = "on_time"
 
@@ -1685,6 +1679,7 @@ def build_final_output(
 
     # 5. Xây dựng Resolution Actions
     resolution_actions: list[str] = []
+    recommended_action = _clean_id(policy_rule.get("recommended_action"))
     rec_refund = round(float(policy_rule.get("refund_brl", 0.0)), 2)
     financial_res["financial_resolution"] = {
         "currency": "BRL",
@@ -1692,7 +1687,11 @@ def build_final_output(
         "refund_lines": (
             [
                 {
-                    "reason_code": f"{primary_issue.upper()}_POLICY_REFUND",
+                    "reason_code": (
+                        recommended_action.upper()
+                        if recommended_action
+                        else f"{primary_issue.upper()}_POLICY_REFUND"
+                    ),
                     "amount_brl": rec_refund,
                     "entity_id": entity_res.resolved_order_ids[0]
                     if entity_res.resolved_order_ids
@@ -1703,19 +1702,13 @@ def build_final_output(
             else []
         ),
     }
-    if rec_refund > 0:
-        resolution_actions.append("APPROVE_REFUND")
-    if seller_ids:
-        resolution_actions.append("NOTIFY_SELLER_DELAY")
-    if not resolution_actions:
-        recommended_action = policy_rule.get("recommended_action")
-        resolution_actions.append(
-            str(recommended_action).upper()
-            if recommended_action
-            else "INVESTIGATE_MISSING_EVIDENCE"
-            if case_status == "needs_investigation"
-            else "CLOSE_CASE_NO_ACTION"
-        )
+    resolution_actions.append(
+        recommended_action.upper()
+        if recommended_action
+        else "INVESTIGATE_MISSING_EVIDENCE"
+        if case_status == "needs_investigation"
+        else "CLOSE_CASE_NO_ACTION"
+    )
 
     if context.failures:
         raise RuntimeError(f"{plan.case_id}: investigation failed; " + "; ".join(context.failures))
@@ -1782,9 +1775,49 @@ def build_final_output(
     if policy_res and policy_res.claim_assessments:
         assessments = [dict(item) for item in policy_res.claim_assessments]
         refundable = financial_res.get("payment_analysis", {}).get("refundable_total_brl") or 0
+        primary_evidence_tools = {
+            "late_delivery_seller": (
+                "get_shipment_summary",
+                "get_product_context",
+                "get_policy",
+            ),
+            "late_delivery_logistics": ("get_shipment_summary", "get_policy"),
+            "valid_split_payment": ("get_order_payments", "get_policy"),
+            "payment_mismatch": ("get_order_payments", "get_policy"),
+            "duplicate_charge": ("get_order_payments", "get_policy"),
+            "refund_pending": (
+                "get_order_payments",
+                "get_refund_timeline",
+                "get_policy",
+            ),
+            "refund_failed": (
+                "get_order_payments",
+                "get_refund_timeline",
+                "get_policy",
+            ),
+            "canceled_order_paid": (
+                "get_order",
+                "get_order_payments",
+                "get_policy",
+            ),
+            "unavailable_order_paid": (
+                "get_order",
+                "get_order_payments",
+                "get_policy",
+            ),
+            "unsupported_claim": ("get_product_context", "get_policy"),
+        }
         for assessment, claim in zip(assessments, plan.claims, strict=True):
+            evidence_tools = (
+                ("get_order_payments", "get_refund_timeline", "get_policy")
+                if claim.topic == "requested_full_refund"
+                else primary_evidence_tools.get(claim.topic, ("get_policy",))
+            )
+            assessment["evidence_refs"] = _cached_tool_refs(context, *evidence_tools)
             if claim.topic == "requested_full_refund":
-                if rec_refund <= 0:
+                if primary_issue == "refund_pending":
+                    assessment.update(verdict="insufficient_evidence", confidence=0.7)
+                elif rec_refund <= 0:
                     assessment.update(verdict="unsupported", confidence=0.9)
                 elif refundable and rec_refund < refundable:
                     assessment.update(verdict="partially_supported", confidence=0.9)
