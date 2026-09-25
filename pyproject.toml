@@ -8,6 +8,8 @@ version = "0.1.0"
 description = "Starter kit for the Day09 L3B Multi-Agent MCP + A2A competition"
 requires-python = ">=3.11"
 dependencies = [
+    "google-adk>=2.9.0",
+    "google-genai>=2.25.0",
     "httpx2>=2,<3",
     "jsonschema[format]>=4.25,<5",
     "mcp>=2,<3",
