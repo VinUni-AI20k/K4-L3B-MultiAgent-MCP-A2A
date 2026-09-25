@@ -21,7 +21,7 @@ Input → Entity Resolver → Coordinator → Specialists → Conflict Resolver 
 | Order/product | TODO | TODO | TODO | TODO |
 | Shipment | TODO | TODO | TODO | TODO |
 | Payment/refund | TODO | TODO | TODO | TODO |
-| Policy | TODO | TODO | TODO | TODO |
+| Policy | Entity result, claims và kết quả shipment/payment nếu có | Gọi `get_policy`, kiểm tra thời hạn 7/30 ngày và đánh giá claim | `get_policy` | `PolicyAnalysis` về Coordinator |
 | Conflict resolver | TODO | TODO | TODO | TODO |
 | Verifier | TODO | TODO | TODO | TODO |
 
@@ -43,6 +43,11 @@ Kết quả được handoff về Coordinator bằng trace metadata, không ghi 
 `evidence_ref` do Gateway trả về và emit `tool_result_consumed`. Cache không được chia sẻ giữa
 các case; cùng một tool call trong case chỉ gọi MCP một lần. `merge_worker_results` từ chối
 specialist payload có field trùng nhau để tránh ghi đè kết quả âm thầm.
+
+Policy Worker chỉ dùng policy evidence để quyết định eligibility. Kết quả Logistics và Financial
+được truyền vào như ngữ cảnh để Coordinator hợp nhất, không bị Policy Worker gọi lại hoặc tự
+ghi đè. Thiếu policy evidence, entity chưa resolve hoặc policy window không xác định đều giữ
+trạng thái thiếu evidence; không suy đoán 7/30 ngày.
 
 ## 5. Failure and efficiency policy
 
