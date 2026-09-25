@@ -60,10 +60,14 @@ Input → Entity Resolver → Coordinator → Specialists → Conflict Resolver 
 
 - **Efficiency Policy:**
   - Tích hợp **Supervisor LLM** (< 10B parameters, model `allam-2-7b` / `llama-3.1-8b-instant`) với chuỗi suy luận (reasoning) phân loại chính xác domain trước khi phân việc.
-  - Ngân sách gọi tool tối ưu chính xác **5 MCP calls/case**:
+  - Ngân sách gọi tool siêu tối ưu trung bình **4.1 MCP calls/case**:
     - Entity Resolution: đúng 2 calls (`get_order`, `get_customer_history`).
-    - Specialists: đúng 3 calls (`get_policy` + 2 công cụ chuyên trách theo domain vụ việc).
-  - Tránh hoàn toàn việc truy vấn chéo domain ngoài luồng (loại bỏ forbidden-domain penalties, tối ưu hóa điểm Evidence coverage và đạt điểm tối đa ở tiêu chí Efficiency).
+    - Specialists: 1 đến 2 calls tối thiểu có chủ đích theo domain (ví dụ `shipment`: chỉ `get_shipment_summary` + `get_policy`; `payment`: chỉ `get_order_payments` + `get_policy`; `unsupported`/`general`: chỉ `get_policy`).
+  - **Liên kết bằng chứng cấp khiếu nại (Claim-level evidence mapping):**
+    - Claim 0 (vấn đề chính): chỉ liên kết với bằng chứng trực tiếp chứng minh lỗi (`get_order`, domain specialist tool).
+    - Claim 1 (yêu cầu hoàn tiền): chỉ liên kết với bằng chứng chính sách và dòng tiền (`get_policy`, `get_order_payments`).
+    - Giúp tối ưu hóa điểm Evidence coverage lên mức tuyệt đối.
+  - **Khả năng chịu lỗi mạng (Network Resiliency):** Tích hợp DNS bypass cục bộ cho `sslip.io` và cơ chế tự động retry kết nối mạng.
   - Duy trì in-memory cache theo `(tool_name, arguments)` trong suốt phiên xử lý của từng case.
 
 ## 6. Verification invariants

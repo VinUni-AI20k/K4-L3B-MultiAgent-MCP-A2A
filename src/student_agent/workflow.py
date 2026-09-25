@@ -14,6 +14,16 @@ from .mcp_gateway import EvidenceGateway
 from .trace import TraceWriter
 
 
+VALID_PRIMARY_ISSUES = {
+    "canceled_order_paid", "unavailable_order_paid", "late_delivery_seller",
+    "late_delivery_logistics", "valid_split_payment", "payment_mismatch",
+    "duplicate_charge", "refund_pending", "refund_failed",
+    "unsupported_claim", "insufficient_evidence"
+}
+
+VALID_DOMAINS = {"shipment", "payment", "refund", "order_status", "general"}
+
+
 class SupervisorLLM:
     def __init__(self) -> None:
         self.api_key = os.getenv("GROQ_API") or os.getenv("GROQ_API_KEY")
@@ -83,13 +93,18 @@ class SupervisorLLM:
                 )
                 self.active_model = m
                 parsed = json.loads(res.choices[0].message.content)
-                parsed_domain = parsed.get("domain", domain)
-                if parsed_domain not in ("shipment", "payment", "refund", "order_status", "general"):
+                parsed_domain = parsed.get("domain")
+                if parsed_domain not in VALID_DOMAINS:
                     parsed_domain = domain
+                parsed_topic = parsed.get("primary_issue")
+                if parsed_topic not in VALID_PRIMARY_ISSUES:
+                    parsed_topic = topic
+                raw_reasoning = parsed.get("reasoning")
+                reasoning = str(raw_reasoning)[:300] if raw_reasoning else default_reasoning
                 return {
                     "domain": parsed_domain,
-                    "topic": parsed.get("primary_issue", topic),
-                    "reasoning": str(parsed.get("reasoning", default_reasoning))[:300],
+                    "topic": parsed_topic,
+                    "reasoning": reasoning,
                     "model": m,
                 }
             except Exception:
@@ -105,6 +120,7 @@ class InvestigationContext:
         self.trace = trace
         self.cache: dict[tuple[str, tuple[tuple[str, str], ...]], Any] = {}
         self.collected_evidence_refs: list[str] = []
+        self.evidence_by_tool: dict[str, str] = {}
 
     async def call(self, tool_name: str, actor: str, **kwargs: str) -> Any | None:
         key = (tool_name, tuple(sorted(kwargs.items())))
@@ -114,8 +130,10 @@ class InvestigationContext:
             res = await self.gateway.call(tool_name, case_id=self.case_id, **kwargs)
             self.cache[key] = res
             ev_ref = res.get("evidence_ref")
-            if ev_ref and ev_ref not in self.collected_evidence_refs:
-                self.collected_evidence_refs.append(ev_ref)
+            if ev_ref:
+                self.evidence_by_tool[tool_name] = ev_ref
+                if ev_ref not in self.collected_evidence_refs:
+                    self.collected_evidence_refs.append(ev_ref)
                 self.trace.emit(
                     case_id=self.case_id,
                     event_type="tool_result_consumed",
@@ -247,15 +265,13 @@ async def solve_case(
     ref_time = None
 
     if domain == "shipment":
-        ship_data, sellers_data, policy_data = await asyncio.gather(
+        ship_data, policy_data = await asyncio.gather(
             ctx.call("get_shipment_summary", actor="shipment-agent", order_id=primary_order_id),
-            ctx.call("get_sellers", actor="shipment-agent", order_id=primary_order_id),
             policy_task,
         )
     elif domain == "payment":
-        pay_data, pay_time, policy_data = await asyncio.gather(
+        pay_data, policy_data = await asyncio.gather(
             ctx.call("get_order_payments", actor="payment-agent", order_id=primary_order_id),
-            ctx.call("get_payment_timeline", actor="payment-agent", order_id=primary_order_id),
             policy_task,
         )
     elif domain == "refund":
@@ -271,11 +287,7 @@ async def solve_case(
             policy_task,
         )
     else:  # general / unsupported
-        ship_data, pay_data, policy_data = await asyncio.gather(
-            ctx.call("get_shipment_summary", actor="shipment-agent", order_id=primary_order_id),
-            ctx.call("get_order_payments", actor="payment-agent", order_id=primary_order_id),
-            policy_task,
-        )
+        policy_data = await policy_task
 
     trace.emit(
         case_id=case_id,
@@ -410,16 +422,42 @@ async def solve_case(
             "entity_id": primary_order_id,
         }]
 
-    # Claim Assessments
+    # Claim Assessments with precise evidence linking
     claim_assessments: list[dict[str, Any]] = []
     if claims:
         c0 = claims[0]
         c0_verdict = "unsupported" if primary_issue == "unsupported_claim" else "supported"
+        c0_refs: list[str] = []
+        ord_ev = ctx.evidence_by_tool.get("get_order")
+        if ord_ev:
+            c0_refs.append(ord_ev)
+        if domain == "shipment":
+            ship_ev = ctx.evidence_by_tool.get("get_shipment_summary")
+            if ship_ev:
+                c0_refs.append(ship_ev)
+        elif domain == "payment":
+            pay_ev = ctx.evidence_by_tool.get("get_order_payments")
+            if pay_ev:
+                c0_refs.append(pay_ev)
+        elif domain == "refund":
+            ref_ev = ctx.evidence_by_tool.get("get_refund_timeline") or ctx.evidence_by_tool.get("get_order_payments")
+            if ref_ev:
+                c0_refs.append(ref_ev)
+        elif domain == "order_status":
+            item_ev = ctx.evidence_by_tool.get("get_order_items")
+            pay_ev = ctx.evidence_by_tool.get("get_order_payments")
+            if item_ev:
+                c0_refs.append(item_ev)
+            if pay_ev and pay_ev not in c0_refs:
+                c0_refs.append(pay_ev)
+        if not c0_refs and ctx.collected_evidence_refs:
+            c0_refs = [ctx.collected_evidence_refs[0]]
+
         claim_assessments.append({
             "claim_id": c0.get("claim_id", "claim-a"),
             "verdict": c0_verdict,
             "confidence": 0.95,
-            "evidence_refs": list(ctx.collected_evidence_refs[:5]),
+            "evidence_refs": c0_refs,
         })
 
         if len(claims) > 1:
@@ -436,11 +474,24 @@ async def solve_case(
             else:
                 c1_verdict = "unsupported"
                 c1_conf = 0.95
+
+            c1_refs: list[str] = []
+            pol_ev = ctx.evidence_by_tool.get("get_policy")
+            if pol_ev:
+                c1_refs.append(pol_ev)
+            pay_ev = ctx.evidence_by_tool.get("get_order_payments") or ctx.evidence_by_tool.get("get_refund_timeline")
+            if pay_ev and pay_ev not in c1_refs:
+                c1_refs.append(pay_ev)
+            elif ord_ev and ord_ev not in c1_refs:
+                c1_refs.append(ord_ev)
+            if not c1_refs and ctx.collected_evidence_refs:
+                c1_refs = [ctx.collected_evidence_refs[-1]]
+
             claim_assessments.append({
                 "claim_id": c1.get("claim_id", "claim-b"),
                 "verdict": c1_verdict,
                 "confidence": c1_conf,
-                "evidence_refs": list(ctx.collected_evidence_refs[:5]),
+                "evidence_refs": c1_refs,
             })
 
     trace.emit(
