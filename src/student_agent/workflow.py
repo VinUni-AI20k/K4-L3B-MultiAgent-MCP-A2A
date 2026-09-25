@@ -42,20 +42,22 @@ FULL_REFUND_ISSUES = {"canceled_order_paid", "unavailable_order_paid"}
 
 # Chi trich dan domain lien quan toi tung loai issue.
 # (Trich moi domain => server cham 0 toan bai: da kiem chung qua 3 lan nop.)
-EVIDENCE_ORDER = ("policy", "order", "customer", "item", "shipment", "payment", "refund")
+EVIDENCE_ORDER = ("policy", "order", "customer", "item", "seller", "shipment", "payment", "refund")
 RELEVANT_DOMAINS = {
-    "late_delivery_seller": {"policy", "order", "item", "shipment", "customer"},
+    "late_delivery_seller": {"policy", "order", "item", "shipment", "seller", "customer"},
     "late_delivery_logistics": {"policy", "order", "item", "shipment", "customer"},
-    "canceled_order_paid": {"policy", "order", "payment", "customer"},
-    "unavailable_order_paid": {"policy", "order", "item", "payment", "customer"},
-    "valid_split_payment": {"policy", "order", "payment", "customer"},
-    "payment_mismatch": {"policy", "order", "payment", "customer"},
-    "duplicate_charge": {"policy", "order", "payment", "customer"},
+    "canceled_order_paid": {"policy", "order", "item", "payment", "customer"},
+    "unavailable_order_paid": {"policy", "order", "item", "payment", "seller", "customer"},
+    "valid_split_payment": {"policy", "order", "item", "payment", "customer"},
+    "payment_mismatch": {"policy", "order", "item", "payment", "customer"},
+    "duplicate_charge": {"policy", "order", "item", "payment", "customer"},
     "refund_pending": {"policy", "order", "payment", "refund", "customer"},
     "refund_failed": {"policy", "order", "payment", "refund", "customer"},
     "unsupported_claim": {"policy", "order", "shipment", "payment", "customer"},
     "insufficient_evidence": {"policy", "order", "customer"},
 }
+# Issue quy trach nhiem cho seller: can evidence seller (get_sellers).
+SELLER_ISSUES = {"late_delivery_seller", "unavailable_order_paid"}
 
 
 # ---------------------------------------------------------------- helpers
@@ -501,6 +503,10 @@ async def _solve(ctx: CaseContext) -> dict[str, Any]:
     confidence = 0.95 if issue == claimed else 0.6
     if scen["ambiguous"]:
         confidence = min(confidence, 0.85)
+    if issue in SELLER_ISSUES:
+        ctx.assign("order-agent", "seller_identity")
+        await ctx.fetch("order-agent", "get_sellers", order_id=oid)
+        ctx.handoff("order-agent", "policy-agent", "seller_identity_ready", ctx.refs("seller"))
     rule = rules.get(issue) or {}
     refund = _num(rule.get("refund_brl")) or 0.0
     status = rule.get("case_status") or ("no_action" if refund == 0 else "action_required")
