@@ -62,7 +62,8 @@ Least privilege: mỗi agent chỉ gọi đúng tool của mình; Conflict resol
 - Các field lệch giữa hai bản ghi được ghi vào `data_conflicts` với `selected_source = get_customer_history`.
 - Primary issue được xác định chỉ từ evidence; claim của khách chỉ dùng để đánh giá `claim_assessments`
   và để quyết định có cần gọi `get_refund_timeline`.
-- Output trích dẫn mọi evidence đã thực sự dùng để suy luận trong case đó; evidence không bao giờ dùng chéo case.
+- Output chỉ trích dẫn evidence thuộc domain liên quan tới loại issue (ví dụ issue thanh toán không trích shipment);
+  evidence không bao giờ dùng chéo case.
 
 ## 5. Failure and efficiency policy
 

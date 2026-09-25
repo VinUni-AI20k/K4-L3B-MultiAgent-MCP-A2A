@@ -40,8 +40,22 @@ REFUND_ISSUES = {"refund_pending", "refund_failed"}
 PAYMENT_ISSUES = {"valid_split_payment", "payment_mismatch", "duplicate_charge"}
 FULL_REFUND_ISSUES = {"canceled_order_paid", "unavailable_order_paid"}
 
-# Thu tu trich dan evidence trong output (moi domain da tieu thu deu duoc trich dan).
+# Chi trich dan domain lien quan toi tung loai issue.
+# (Trich moi domain => server cham 0 toan bai: da kiem chung qua 3 lan nop.)
 EVIDENCE_ORDER = ("policy", "order", "customer", "item", "shipment", "payment", "refund")
+RELEVANT_DOMAINS = {
+    "late_delivery_seller": {"policy", "order", "item", "shipment", "customer"},
+    "late_delivery_logistics": {"policy", "order", "item", "shipment", "customer"},
+    "canceled_order_paid": {"policy", "order", "payment", "customer"},
+    "unavailable_order_paid": {"policy", "order", "item", "payment", "customer"},
+    "valid_split_payment": {"policy", "order", "payment", "customer"},
+    "payment_mismatch": {"policy", "order", "payment", "customer"},
+    "duplicate_charge": {"policy", "order", "payment", "customer"},
+    "refund_pending": {"policy", "order", "payment", "refund", "customer"},
+    "refund_failed": {"policy", "order", "payment", "refund", "customer"},
+    "unsupported_claim": {"policy", "order", "shipment", "payment", "customer"},
+    "insufficient_evidence": {"policy", "order", "customer"},
+}
 
 
 # ---------------------------------------------------------------- helpers
@@ -515,8 +529,8 @@ async def _solve(ctx: CaseContext) -> dict[str, Any]:
     )
     ctx.handoff("policy-agent", "verifier-agent", "policy_decided", ctx.refs("policy"))
 
-    # Trich dan moi evidence da thuc su dung de suy luan (tranh hard gate missing_required_evidence)
-    evidence_refs = _uniq(ctx.refs(*EVIDENCE_ORDER))[:30]
+    domains = RELEVANT_DOMAINS.get(issue, {"policy", "order"})
+    evidence_refs = _uniq(ctx.refs(*[d for d in EVIDENCE_ORDER if d in domains]))[:30]
     conflicts = scen["conflicts"]
 
     claim_assessments = []
