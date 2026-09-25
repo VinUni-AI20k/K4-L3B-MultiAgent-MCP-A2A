@@ -130,11 +130,36 @@ class PolicyAgent:
 
         rule = policy_rules.get(primary_issue, {})
         case_status = rule.get("case_status", "action_required")
+        if primary_issue in ("unsupported_claim", "valid_split_payment"):
+            case_status = "no_action"
         recommended_action = rule.get("recommended_action", "document_no_action")
-        refund_brl = float(rule.get("refund_brl", 0.0))
+        if case_status == "no_action":
+            recommended_action = "document_no_action"
+            refund_brl = 0.0
+        else:
+            refund_brl = float(rule.get("refund_brl", 0.0))
 
-        # Financial consistency check: refund cannot exceed captured amount
-        refund_brl = min(refund_brl, payment_findings.captured_total_brl)
+            # Ground with actual seller freight if available
+            if primary_issue == "late_delivery_seller":
+                target_seller = (
+                    shipment_findings.late_seller_ids[0]
+                    if shipment_findings.late_seller_ids
+                    else (order_findings.seller_ids[0] if order_findings.seller_ids else None)
+                )
+                if target_seller and target_seller in order_findings.seller_financials:
+                    seller_freight = order_findings.seller_financials[target_seller].get(
+                        "freight", 0.0
+                    )
+                    if seller_freight > 0:
+                        refund_brl = seller_freight
+
+            # Financial consistency check: refund cannot exceed captured amount
+            max_refundable = (
+                payment_findings.refundable_total_brl
+                if payment_findings.refundable_total_brl > 0
+                else payment_findings.captured_total_brl
+            )
+            refund_brl = min(refund_brl, max_refundable) if max_refundable > 0 else refund_brl
 
         # Responsible parties
         raw_parties = rule.get("responsible_parties", [])

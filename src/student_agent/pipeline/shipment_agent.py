@@ -51,6 +51,8 @@ class ShipmentAgent:
             findings.estimated_delivery_at = estimated_at
             findings.shipping_limits = limits
             findings.timeline_complete = bool(carrier_at and customer_at and estimated_at)
+            ship_id = data.get("shipment_id") or f"shipment-{order_id[:12]}"
+            findings.shipment_ids = [ship_id]
 
             # Evaluate seller handoff vs shipping limits
             late_sellers: list[str] = []
