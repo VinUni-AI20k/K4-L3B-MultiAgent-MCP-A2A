@@ -4,7 +4,10 @@ import argparse
 import asyncio
 import json
 import sys
+import tempfile
 from pathlib import Path
+
+import httpx2
 
 from .cases import load_case_set
 from .config import Settings
@@ -19,6 +22,13 @@ def _root(value: str) -> Path:
     return Path(value).resolve()
 
 
+def _error_message(error: Exception) -> str:
+    """Expose MCP failures nested by the transport's async task group."""
+    if isinstance(error, ExceptionGroup):
+        return "; ".join(dict.fromkeys(_error_message(item) for item in error.exceptions))
+    return str(error)
+
+
 async def _show_tools(root: Path) -> None:
     settings = Settings.load(root)
     contracts = Contracts(root / "contracts" / "schemas")
@@ -31,20 +41,50 @@ async def _run(root: Path) -> None:
     settings = Settings.load(root)
     case_set = load_case_set(root)
     contracts = Contracts(root / "contracts" / "schemas")
+    await _ensure_run(settings, case_set.version)
     output_root = root / "outputs"
     trace_path = root / "traces" / "trace.jsonl"
     output_root.mkdir(parents=True, exist_ok=True)
     trace_path.parent.mkdir(parents=True, exist_ok=True)
-    for stale in output_root.glob("*.json"):
-        stale.unlink()
-    trace_path.unlink(missing_ok=True)
-    trace = TraceWriter(trace_path, contracts)
+    # Stage the complete run; MCP failures must leave existing artifacts intact.
+    with tempfile.TemporaryDirectory(prefix="day09-run-", dir=root) as staged:
+        await _generate_run(root, Path(staged), settings, case_set, contracts)
+        staged_root = Path(staged)
+        for case_id in case_set.case_ids:
+            (staged_root / "outputs" / f"{case_id}.json").replace(output_root / f"{case_id}.json")
+        (staged_root / "traces" / "trace.jsonl").replace(trace_path)
+
+
+async def _ensure_run(settings: Settings, case_set_version: str) -> None:
+    """The Gateway requires an active team run, even when tools/list succeeds."""
+    async with httpx2.AsyncClient(timeout=30.0) as client:
+        response = await client.post(
+            f"{settings.competition_api_url}/api/v2/runs",
+            headers={"Authorization": f"Bearer {settings.team_api_key}"},
+            json={"variant_id": "l3b"},
+        )
+    if response.status_code not in (200, 201):
+        raise RuntimeError(f"Cannot initialize L3B run: HTTP {response.status_code}")
+    run = response.json()
+    if run.get("case_set_version") != case_set_version:
+        raise ValueError("Local case-set differs from active run; download the current L3B inputs")
+    run_endpoint = run.get("mcp_endpoint", settings.mcp_endpoint).rstrip("/")
+    if run_endpoint != settings.mcp_endpoint.rstrip("/"):
+        raise ValueError("MCP_ENDPOINT differs from the endpoint returned by the active run")
+    print(f"Active L3B run: {case_set_version}; expires {run.get('expires_at', 'unknown')}")
+
+
+async def _generate_run(root, staged_root, settings, case_set, contracts, completed=()) -> None:
+    output_root = staged_root / "outputs"
+    output_root.mkdir(exist_ok=True)
+    trace = TraceWriter(staged_root / "traces" / "trace.jsonl", contracts)
 
     async with connect_gateway(settings.mcp_endpoint, settings.team_api_key, contracts) as gateway:
         discovered_tools = await gateway.list_tools()
         if not discovered_tools:
             raise RuntimeError("MCP Gateway returned no tools")
-        for case_id in case_set.case_ids:
+
+        async def solve_one(case_id):
             case = case_set.cases[case_id]
             trace.emit(case_id=case_id, event_type="case_received", actor="coordinator")
             output = await solve_case(case, gateway, trace)
@@ -58,6 +98,19 @@ async def _run(root: Path) -> None:
             )
             temporary.replace(target)
             trace.emit(case_id=case_id, event_type="case_finalized", actor="coordinator")
+            print(f"OK: {case_id}; {len(output['evidence_refs'])} evidence refs", flush=True)
+
+        semaphore = asyncio.Semaphore(4)
+
+        async def bounded(case_id):
+            async with semaphore:
+                await solve_one(case_id)
+
+        async with asyncio.TaskGroup() as tasks:
+            for case_id in case_set.case_ids:
+                if case_id not in completed:
+                    tasks.create_task(bounded(case_id))
+    validate_artifacts(staged_root, case_set, contracts)
 
 
 def parser() -> argparse.ArgumentParser:
@@ -80,8 +133,7 @@ def main() -> None:
         if args.command == "validate-inputs":
             case_set = load_case_set(root)
             print(
-                f"OK: {case_set.variant_id} / {case_set.version} / "
-                f"{len(case_set.case_ids)} cases"
+                f"OK: {case_set.variant_id} / {case_set.version} / {len(case_set.case_ids)} cases"
             )
         elif args.command == "mcp-tools":
             asyncio.run(_show_tools(root))
@@ -95,8 +147,8 @@ def main() -> None:
         elif args.command == "package":
             destination = package_submission(root, root / args.output)
             print(f"OK: {destination}")
-    except (OSError, RuntimeError, ValueError) as exc:
-        print(f"ERROR: {exc}", file=sys.stderr)
+    except (OSError, RuntimeError, ValueError, ExceptionGroup) as exc:
+        print(f"ERROR: {_error_message(exc)}", file=sys.stderr)
         raise SystemExit(1) from exc
 
 

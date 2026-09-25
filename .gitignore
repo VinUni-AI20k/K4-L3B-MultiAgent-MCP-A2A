@@ -25,6 +25,7 @@ outputs/*
 traces/*
 !traces/.gitkeep
 dist/*
+day09-run-*/
 !dist/.gitkeep
 *.zip
 *.log

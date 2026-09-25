@@ -146,6 +146,13 @@ Hoàn thiện mô tả thiết kế trong `ARCHITECTURE.md`.
 
 ## 6. Chạy và kiểm tra
 
+`day09 run` khởi tạo/lấy run L3B đang hoạt động qua `POST /api/v2/runs`
+bằng Team API Key trước khi gọi MCP. Chỉ liệt kê được MCP tools không có nghĩa
+run đã sẵn sàng. CLI kiểm tra phiên bản case-set và endpoint do run trả về;
+khi lệch phiên bản, cần tải lại input chính thức. Output và trace mới được xử lý
+trong thư mục tạm, chỉ thay thế bản hiện tại sau khi toàn bộ case được kiểm tra.
+Tối đa 4 case chạy đồng thời; mỗi case giữ cache và evidence refs riêng.
+
 ```bash
 day09 run
 day09 validate
