@@ -96,9 +96,11 @@ def package_submission(root: Path, destination: Path) -> Path:
     manifest = build_manifest(case_set)
     contracts.validate_manifest(manifest)
 
+    trace_payload = ("\n".join(trace_lines) + ("\n" if trace_lines else "")).encode()
     payloads = {
         "manifest.json": json.dumps(manifest, separators=(",", ":")).encode(),
-        "trace.jsonl": ("\n".join(trace_lines) + ("\n" if trace_lines else "")).encode(),
+        "trace.jsonl": trace_payload,
+        "traces/trace.jsonl": trace_payload,
         **{
             f"outputs/{case_id}.json": json.dumps(
                 outputs[case_id], ensure_ascii=False, separators=(",", ":")
