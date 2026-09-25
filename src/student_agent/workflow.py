@@ -458,6 +458,185 @@ async def resolve_entity(plan: CasePlan, context: InvestigationContext) -> Entit
     return result
 
 
+def _parse_amount(value: Any) -> float:
+    """Safely convert numeric or string amount to non-negative float."""
+    if isinstance(value, (int, float)):
+        return max(0.0, float(value))
+    if isinstance(value, str):
+        try:
+            cleaned = value.replace("$", "").replace("R$", "").replace(",", ".").strip()
+            return max(0.0, float(cleaned))
+        except ValueError:
+            return 0.0
+    return 0.0
+
+
+async def run_financial_worker(
+    plan: CasePlan,
+    context: InvestigationContext,
+    entity: EntityResolution,
+) -> dict[str, Any]:
+    """Financial Worker: Reconcile payments, refunds and propose financial resolution."""
+
+    order_id = entity.resolved_order_ids[0] if entity.resolved_order_ids else None
+    if not order_id or entity.status == "not_found":
+        payment_analysis = {
+            "verdict": "insufficient_evidence",
+            "captured_total_brl": None,
+            "refunded_total_brl": None,
+            "refundable_total_brl": None,
+        }
+        financial_resolution = {
+            "currency": "BRL",
+            "recommended_refund_brl": 0.0,
+            "refund_lines": [],
+        }
+        context.trace.emit(
+            case_id=plan.case_id,
+            event_type="handoff",
+            actor="financial-worker",
+            target="coordinator",
+            decision_code="FINANCIAL_INSUFFICIENT_EVIDENCE",
+            attributes={"recommended_refund_brl": 0.0},
+        )
+        return {
+            "payment_analysis": payment_analysis,
+            "financial_resolution": financial_resolution,
+        }
+
+    payment_data: dict[str, Any] = {}
+    refund_data: dict[str, Any] = {}
+    evidence_refs: list[str] = []
+
+    try:
+        ev_pay = await context.call("financial-worker", "get_payment", order_id=order_id)
+        payment_data = _evidence_data(ev_pay)
+        evidence_refs.append(ev_pay["evidence_ref"])
+    except (RuntimeError, ValueError):
+        pass
+
+    try:
+        ev_ref = await context.call("financial-worker", "get_refund", order_id=order_id)
+        refund_data = _evidence_data(ev_ref)
+        evidence_refs.append(ev_ref["evidence_ref"])
+    except (RuntimeError, ValueError):
+        pass
+
+    payments = payment_data.get("payments", [])
+    if isinstance(payments, dict):
+        payments = [payments]
+    elif not isinstance(payments, list):
+        payments = [payment_data] if payment_data else []
+
+    captured_total = 0.0
+    payment_values: list[float] = []
+    for pay in payments:
+        if not isinstance(pay, dict):
+            continue
+        status = str(pay.get("status", "success")).casefold()
+        val = _parse_amount(pay.get("payment_value", pay.get("amount", 0.0)))
+        if status in ("success", "captured", "paid", "settled", "authorized"):
+            captured_total += val
+            if val > 0:
+                payment_values.append(val)
+
+    has_duplicate = len(payment_values) >= 2 and len(set(payment_values)) == 1 and plan.topic == "payment"
+
+    refunds = refund_data.get("refunds", [])
+    if isinstance(refunds, dict):
+        refunds = [refunds]
+    elif not isinstance(refunds, list):
+        refunds = [refund_data] if refund_data else []
+
+    refunded_total = 0.0
+    has_failed_refund = False
+    has_pending_refund = False
+
+    for ref in refunds:
+        if not isinstance(ref, dict):
+            continue
+        status = str(ref.get("status", "")).casefold()
+        val = _parse_amount(ref.get("refund_amount", ref.get("amount", 0.0)))
+        if status in ("failed", "rejected", "error"):
+            has_failed_refund = True
+        elif status in ("pending", "processing", "in_review"):
+            has_pending_refund = True
+        elif status in ("completed", "success", "refunded"):
+            refunded_total += val
+
+    captured_total = round(captured_total, 2)
+    refunded_total = round(refunded_total, 2)
+    refundable_total = round(max(0.0, captured_total - refunded_total), 2)
+
+    if has_failed_refund:
+        verdict = "refund_failed"
+    elif has_pending_refund:
+        verdict = "refund_pending"
+    elif has_duplicate:
+        verdict = "duplicate_capture"
+    elif captured_total > 0 and refundable_total == 0:
+        verdict = "refunded"
+    elif not payments and not refunds:
+        verdict = "insufficient_evidence"
+    else:
+        verdict = "reconciled"
+
+    recommended_refund = 0.0
+    refund_lines: list[dict[str, Any]] = []
+
+    is_refund_topic = plan.topic in ("refund", "cancellation", "payment") or any(
+        c.topic in ("refund", "cancellation", "payment") for c in plan.claims
+    )
+
+    if is_refund_topic and refundable_total > 0:
+        if verdict == "duplicate_capture" and len(payment_values) >= 2:
+            recommended_refund = round(payment_values[0], 2)
+            reason = "DUPLICATE_CHARGE_REFUND"
+        else:
+            recommended_refund = refundable_total
+            reason = "CUSTOMER_COMPLAINT_FULL_REFUND"
+
+        refund_lines.append(
+            {
+                "reason_code": reason,
+                "amount_brl": recommended_refund,
+                "entity_id": order_id,
+            }
+        )
+
+    payment_analysis = {
+        "verdict": verdict,
+        "captured_total_brl": captured_total if payments else None,
+        "refunded_total_brl": refunded_total if refunds or payments else None,
+        "refundable_total_brl": refundable_total if payments else None,
+    }
+
+    financial_resolution = {
+        "currency": "BRL",
+        "recommended_refund_brl": recommended_refund,
+        "refund_lines": refund_lines,
+    }
+
+    context.trace.emit(
+        case_id=plan.case_id,
+        event_type="handoff",
+        actor="financial-worker",
+        target="coordinator",
+        decision_code=f"FINANCIAL_{verdict.upper()}",
+        evidence_refs=evidence_refs or None,
+        attributes={
+            "captured_total_brl": captured_total,
+            "refundable_total_brl": refundable_total,
+            "recommended_refund_brl": recommended_refund,
+        },
+    )
+
+    return {
+        "payment_analysis": payment_analysis,
+        "financial_resolution": financial_resolution,
+    }
+
+
 def merge_worker_results(*results: dict[str, Any]) -> dict[str, Any]:
     """Combine disjoint specialist payloads and reject silent key overwrites."""
 
