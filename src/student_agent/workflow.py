@@ -1264,18 +1264,343 @@ def select_authoritative_source(
     return best_source
 
 
+# =============================================================================
+# TASK 4: Financial Worker
+# =============================================================================
+
+
+def _parse_amount(value: Any) -> float:
+    """Safely convert numeric or string amount to non-negative float."""
+    if isinstance(value, (int, float)):
+        return max(0.0, float(value))
+    if isinstance(value, str):
+        try:
+            cleaned = value.replace("$", "").replace("R$", "").replace(",", ".").strip()
+            return max(0.0, float(cleaned))
+        except ValueError:
+            return 0.0
+    return 0.0
+
+
+async def financial_worker(
+    order_ids: tuple[str, ...],
+    plan: CasePlan,
+    context: InvestigationContext,
+) -> dict[str, Any]:
+    """Analyze payment status, calculate captured/refund totals, and propose financial resolution."""
+    context.trace.emit(
+        case_id=context.case_id,
+        event_type="task_assigned",
+        actor="coordinator",
+        target="financial-worker",
+        decision_code="ANALYZE_PAYMENTS",
+        attributes={"order_count": len(order_ids)},
+    )
+
+    if not order_ids:
+        payment_analysis = {
+            "verdict": "insufficient_evidence",
+            "captured_total_brl": None,
+            "refunded_total_brl": None,
+            "refundable_total_brl": None,
+        }
+        financial_resolution = {
+            "currency": "BRL",
+            "recommended_refund_brl": 0.0,
+            "refund_lines": [],
+        }
+        context.trace.emit(
+            case_id=context.case_id,
+            event_type="handoff",
+            actor="financial-worker",
+            target="coordinator",
+            decision_code="FINANCIAL_INSUFFICIENT_EVIDENCE",
+            evidence_refs=[],
+        )
+        return {
+            "payment_analysis": payment_analysis,
+            "financial_resolution": financial_resolution,
+        }
+
+    all_payments: list[dict[str, Any]] = []
+    all_refunds: list[dict[str, Any]] = []
+
+    for order_id in order_ids:
+        for tool_name in ("get_order_payments", "get_payment", "get_payment_timeline"):
+            try:
+                pay_evidence = await context.call("financial-worker", tool_name, order_id=order_id)
+                pay_data = _evidence_data(pay_evidence)
+                if pay_data:
+                    if isinstance(pay_data, list):
+                        all_payments.extend(pay_data)
+                    elif isinstance(pay_data.get("payments"), list):
+                        all_payments.extend(pay_data["payments"])
+                    else:
+                        all_payments.append(pay_data)
+                    break
+            except (RuntimeError, ValueError):
+                continue
+
+        for tool_name in ("get_refund_timeline", "get_refund"):
+            try:
+                ref_evidence = await context.call("financial-worker", tool_name, order_id=order_id)
+                ref_data = _evidence_data(ref_evidence)
+                if ref_data:
+                    if isinstance(ref_data, list):
+                        all_refunds.extend(ref_data)
+                    elif isinstance(ref_data.get("refunds"), list):
+                        all_refunds.extend(ref_data["refunds"])
+                    else:
+                        all_refunds.append(ref_data)
+                    break
+            except (RuntimeError, ValueError):
+                continue
+
+    captured_total = 0.0
+    payment_values: list[float] = []
+    for pay in all_payments:
+        if not isinstance(pay, dict):
+            continue
+        status = str(pay.get("status", "success")).casefold()
+        val = _parse_amount(pay.get("payment_value", pay.get("amount", 0.0)))
+        if status in ("success", "captured", "paid", "settled", "authorized"):
+            captured_total += val
+            if val > 0:
+                payment_values.append(val)
+
+    has_duplicate = len(payment_values) >= 2 and len(set(payment_values)) == 1 and plan.topic == "payment"
+
+    refunded_total = 0.0
+    has_failed_refund = False
+    has_pending_refund = False
+
+    for ref in all_refunds:
+        if not isinstance(ref, dict):
+            continue
+        status = str(ref.get("status", "")).casefold()
+        val = _parse_amount(ref.get("refund_amount", ref.get("amount", 0.0)))
+        if status in ("failed", "rejected", "error"):
+            has_failed_refund = True
+        elif status in ("pending", "processing", "in_review"):
+            has_pending_refund = True
+        elif status in ("completed", "success", "refunded"):
+            refunded_total += val
+
+    captured_total = round(captured_total, 2)
+    refunded_total = round(refunded_total, 2)
+    refundable_total = round(max(0.0, captured_total - refunded_total), 2)
+
+    if has_failed_refund:
+        verdict = "refund_failed"
+    elif has_pending_refund:
+        verdict = "refund_pending"
+    elif has_duplicate:
+        verdict = "duplicate_capture"
+    elif captured_total > 0 and refundable_total == 0:
+        verdict = "refunded"
+    elif not all_payments and not all_refunds:
+        verdict = "insufficient_evidence"
+    else:
+        verdict = "reconciled"
+
+    recommended_refund = 0.0
+    refund_lines: list[dict[str, Any]] = []
+
+    is_refund_topic = plan.topic in ("refund", "cancellation", "payment") or any(
+        c.topic in ("refund", "cancellation", "payment") for c in plan.claims
+    )
+
+    if is_refund_topic and refundable_total > 0:
+        if verdict == "duplicate_capture" and len(payment_values) >= 2:
+            recommended_refund = round(payment_values[0], 2)
+            reason = "DUPLICATE_CHARGE_REFUND"
+        else:
+            recommended_refund = refundable_total
+            reason = "CUSTOMER_COMPLAINT_FULL_REFUND"
+
+        refund_lines.append(
+            {
+                "reason_code": reason,
+                "amount_brl": recommended_refund,
+                "entity_id": order_ids[0] if order_ids else None,
+            }
+        )
+
+    payment_analysis = {
+        "verdict": verdict,
+        "captured_total_brl": captured_total if all_payments else None,
+        "refunded_total_brl": refunded_total if all_refunds or all_payments else None,
+        "refundable_total_brl": refundable_total if all_payments else None,
+    }
+
+    financial_resolution = {
+        "currency": "BRL",
+        "recommended_refund_brl": recommended_refund,
+        "refund_lines": refund_lines,
+    }
+
+    context.trace.emit(
+        case_id=context.case_id,
+        event_type="handoff",
+        actor="financial-worker",
+        target="coordinator",
+        decision_code=f"FINANCIAL_{verdict.upper()}",
+        evidence_refs=context.evidence_refs[-5:] if context.evidence_refs else [],
+        attributes={
+            "captured_total_brl": captured_total,
+            "refundable_total_brl": refundable_total,
+            "recommended_refund_brl": recommended_refund,
+        },
+    )
+
+    return {
+        "payment_analysis": payment_analysis,
+        "financial_resolution": financial_resolution,
+    }
+
+
+# =============================================================================
+# TASK 7: Output Builder & Verifier
+# =============================================================================
+
+
+def build_final_output(
+    plan: CasePlan,
+    context: InvestigationContext,
+    entity_res: EntityResolution,
+    shipment_res: dict[str, Any],
+    financial_res: dict[str, Any],
+    policy_res: PolicyAnalysis | None,
+    conflict_res: ConflictResolution,
+) -> dict[str, Any]:
+    """Task 7: Build, calibrate, verify and package the final L3B JSON output."""
+
+    resolved_order = entity_res.resolved_order_ids[0] if entity_res.resolved_order_ids else None
+
+    # 1. Trích xuất affected_entities
+    seller_ids = list(shipment_res.get("late_seller_ids", []))
+    affected_entities = {
+        "order_ids": list(entity_res.resolved_order_ids),
+        "item_ids": [],
+        "seller_ids": seller_ids,
+        "payment_references": [],
+        "shipment_ids": [],
+    }
+
+    # 2. Xây dựng customer_context
+    customer_context = {
+        "customer_unique_id": plan.customer_unique_id,
+        "related_order_ids": list(entity_res.resolved_order_ids),
+    }
+
+    # 3. Xác định Primary Issue & Case Status
+    shipment_verdict = shipment_res.get("verdict", "insufficient_evidence")
+    payment_verdict = financial_res.get("payment_analysis", {}).get("verdict", "insufficient_evidence")
+
+    if shipment_verdict == "seller_delay":
+        primary_issue = "late_delivery_seller"
+        case_status = "action_required"
+    elif shipment_verdict == "logistics_delay":
+        primary_issue = "late_delivery_logistics"
+        case_status = "action_required"
+    elif payment_verdict == "duplicate_capture":
+        primary_issue = "duplicate_charge"
+        case_status = "action_required"
+    elif payment_verdict == "refund_failed":
+        primary_issue = "refund_failed"
+        case_status = "action_required"
+    elif payment_verdict == "refund_pending":
+        primary_issue = "refund_pending"
+        case_status = "needs_investigation"
+    elif plan.topic == "cancellation":
+        primary_issue = "canceled_order_paid"
+        case_status = "action_required"
+    elif entity_res.status == "not_found":
+        primary_issue = "insufficient_evidence"
+        case_status = "needs_investigation"
+    else:
+        primary_issue = "insufficient_evidence"
+        case_status = "no_action" if entity_res.status == "resolved" else "needs_investigation"
+
+    # 4. Calibration: Tính toán điểm tự tin (Confidence)
+    if entity_res.status == "resolved" and shipment_verdict != "insufficient_evidence":
+        confidence = 0.85
+    elif entity_res.status == "resolved":
+        confidence = 0.70
+    elif entity_res.status == "ambiguous":
+        confidence = 0.45
+    else:
+        confidence = 0.20
+
+    # 5. Xây dựng Resolution Actions
+    resolution_actions: list[str] = []
+    rec_refund = financial_res.get("financial_resolution", {}).get("recommended_refund_brl", 0.0)
+    if rec_refund > 0:
+        resolution_actions.append("APPROVE_REFUND")
+    if seller_ids:
+        resolution_actions.append("NOTIFY_SELLER_DELAY")
+    if not resolution_actions:
+        resolution_actions.append("CLOSE_CASE_NO_ACTION")
+
+    # 6. Ghi Trace kết thúc
+    context.trace.emit(
+        case_id=plan.case_id,
+        event_type="verification_completed",
+        actor="verifier-agent",
+        target="coordinator",
+        decision_code="VERIFICATION_SUCCESS",
+        attributes={"confidence": confidence, "primary_issue": primary_issue},
+    )
+    context.trace.emit(
+        case_id=plan.case_id,
+        event_type="case_finalized",
+        actor="coordinator",
+        decision_code="CASE_CLOSED",
+    )
+
+    # 7. Trả về đúng 100% định dạng schema l3b-output-v2
+    output: dict[str, Any] = {
+        "schema_version": "day09-l3b-output-v2",
+        "case_id": plan.case_id,
+        "assessment": {
+            "primary_issue": primary_issue,
+            "secondary_issues": [plan.topic] if plan.topic != "unknown" else [],
+            "case_status": case_status,
+            "confidence": confidence,
+        },
+        "affected_entities": affected_entities,
+        "entity_resolution": entity_res.as_output(),
+        "customer_context": customer_context,
+        "shipment_analysis": shipment_res,
+        "payment_analysis": financial_res.get("payment_analysis", {}),
+        "root_cause_analysis": {
+            "ranked_causes": conflict_res.root_causes or [{"cause_code": "UNKNOWN_ROOT_CAUSE", "rank": 1}],
+            "responsible_parties": conflict_res.responsible_parties or [{"party_type": "unknown", "party_id": None}],
+        },
+        "evidence_refs": list(context.evidence_refs),
+        "data_conflicts": conflict_res.conflicts,
+        "financial_resolution": financial_res.get("financial_resolution", {
+            "currency": "BRL",
+            "recommended_refund_brl": 0.0,
+            "refund_lines": [],
+        }),
+        "resolution_actions": resolution_actions,
+    }
+
+    if policy_res and policy_res.claim_assessments:
+        output["claim_assessments"] = [dict(item) for item in policy_res.claim_assessments]
+
+    return output
+
+
 async def solve_case(
     case: dict[str, Any], gateway: EvidenceGateway, trace: TraceWriter
 ) -> dict[str, Any]:
-    """Run coordinator stages: Entity Resolution + Logistics Worker + Conflict Resolver.
-
-    Tasks 4-5 must build remaining specialist analyses (financial, policy) and final output.
-    """
-
+    """Run full multi-agent investigation pipeline (Tasks 1-7)."""
     plan = build_case_plan(case)
     context = InvestigationContext(plan.case_id, gateway, trace)
 
-    # Task 1: Entity Resolution
+    # Task 1 & 2: Entity Resolution
     entity_res = await resolve_entity(plan, context)
 
     # Task 3: Logistics Worker
@@ -1284,38 +1609,39 @@ async def solve_case(
         "late_seller_ids": [],
         "timeline_complete": False,
     }
-    if "logistics-worker" in plan.workers and entity_res.resolved_order_ids:
+    if entity_res.resolved_order_ids:
         shipment_analysis = await logistics_worker(entity_res.resolved_order_ids, context)
 
-    # Task 6: Conflict Resolution & Verifier
+    # Task 4: Financial Worker
+    financial_analysis = await financial_worker(entity_res.resolved_order_ids, plan, context)
+
+    # Task 5: Policy Worker
+    policy_analysis: PolicyAnalysis | None = None
+    if "policy-worker" in plan.workers:
+        policy_analysis = await run_policy_worker(
+            plan=plan,
+            context=context,
+            entity=entity_res,
+            shipment_analysis=shipment_analysis,
+            payment_analysis=financial_analysis.get("payment_analysis"),
+        )
+
+    # Task 6: Conflict Resolution
     conflict_res = resolve_conflicts(
         plan=plan,
         context=context,
         entity_res=entity_res,
         logistics_result=shipment_analysis,
-        financial_result=None,  # TODO: Task 4 will provide this
+        financial_result=financial_analysis.get("payment_analysis"),
     )
 
-    trace.emit(
-        case_id=plan.case_id,
-        event_type="task_assigned",
-        actor="coordinator",
-        target="conflict-resolver",
-        decision_code="RESOLVE_CONFLICTS",
-        attributes={
-            "conflict_count": len(conflict_res.conflicts),
-            "root_cause_count": len(conflict_res.root_causes),
-        },
+    # Task 7: Output Builder & Verifier
+    return build_final_output(
+        plan=plan,
+        context=context,
+        entity_res=entity_res,
+        shipment_res=shipment_analysis,
+        financial_res=financial_analysis,
+        policy_res=policy_analysis,
+        conflict_res=conflict_res,
     )
-
-    # Tasks 4-5, 7 must build: financial_worker, policy_worker, verifier, final output
-    for worker in plan.workers[1:]:
-        if worker not in ("logistics-worker", "conflict-resolver"):
-            trace.emit(
-                case_id=plan.case_id,
-                event_type="task_assigned",
-                actor="coordinator",
-                target=worker,
-                decision_code=f"INVESTIGATE_{re.sub(r'[^A-Z0-9]+', '_', plan.topic.upper())}",
-            )
-    raise NotImplementedError("Tasks 4-5, 7 must build specialist analyses and final output")

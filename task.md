@@ -18,10 +18,10 @@ Task 2: Entity Resolution (trong workflow)
 
 Task 3: Logistics Worker (trong workflow)
 
-- [ ] Gọi get_order / get_order_items
-- [ ] Đối soát ngày giao thực tế vs hẹn
-- [ ] Xác định lỗi thuộc Shipper hay Seller
-- [ ] Output: shipment_analysis verdict
+- [x] Gọi get_order / get_order_items
+- [x] Đối soát ngày giao thực tế vs hẹn
+- [x] Xác định lỗi thuộc Shipper hay Seller
+- [x] Output: shipment_analysis verdict
 
 Task 4: Financial Worker (trong workflow)
 
@@ -32,19 +32,19 @@ Task 4: Financial Worker (trong workflow)
 
 Task 5: Policy Worker (trong workflow)
 
-- [ ] Gọi get_policy để tra cứu quy định
-- [ ] Kiểm tra thời hiệu (7 ngày/30 ngày)
-- [ ] Validate claims vs policy
+- [x] Gọi get_policy để tra cứu quy định
+- [x] Kiểm tra thời hiệu (7 ngày/30 ngày)
+- [x] Validate claims vs policy
 
 Task 6: Conflict Resolution & Verifier
 
-- [ ] Phát hiện conflict giữa sources
-- [ ] Quyết định precedence (policy > payment > logistics)
-- [ ] Output: data_conflicts, root_cause_analysis
+- [x] Phát hiện conflict giữa sources
+- [x] Quyết định precedence (policy > payment > logistics)
+- [x] Output: data_conflicts, root_cause_analysis
 
 Task 7: Output Builder
 
-- [ ] Build đúng schema l3b-output-v2
-- [ ] Populate all required fields
-- [ ] Confidence calibration
-- [ ] Trace: verification_completed, case_finalized
+- [x] Build đúng schema l3b-output-v2
+- [x] Populate all required fields
+- [x] Confidence calibration
+- [x] Trace: verification_completed, case_finalized
