@@ -125,6 +125,26 @@ class EntityResolution:
         }
 
 
+@dataclass(frozen=True)
+class PolicyAnalysis:
+    """Evidence-backed policy decision returned by the policy worker."""
+
+    status: str
+    applicable_days: int | None
+    claim_assessments: tuple[dict[str, Any], ...]
+    evidence_refs: tuple[str, ...]
+    reason_codes: tuple[str, ...]
+
+    def as_output(self) -> dict[str, Any]:
+        return {
+            "policy_status": self.status,
+            "applicable_days": self.applicable_days,
+            "claim_assessments": [dict(item) for item in self.claim_assessments],
+            "evidence_refs": list(self.evidence_refs),
+            "reason_codes": list(self.reason_codes),
+        }
+
+
 @dataclass
 class InvestigationContext:
     """Case-scoped MCP cache and evidence registry used by all workers."""
@@ -224,6 +244,137 @@ def _contains_value(value: Any, expected: str) -> bool:
 def _order_matches(data: dict[str, Any], order_id: str) -> bool:
     evidence_order_id = _clean_id(_first_value(data, ("order_id",)))
     return evidence_order_id == order_id if evidence_order_id is not None else bool(data)
+
+
+def _first_scalar(value: Any, keys: tuple[str, ...]) -> Any:
+    """Find a scalar policy attribute in differently shaped gateway payloads."""
+
+    if isinstance(value, dict):
+        for key in keys:
+            candidate = value.get(key)
+            if isinstance(candidate, (str, int, float, bool)):
+                return candidate
+        for nested in value.values():
+            found = _first_scalar(nested, keys)
+            if found is not None:
+                return found
+    elif isinstance(value, list):
+        for nested in value:
+            found = _first_scalar(nested, keys)
+            if found is not None:
+                return found
+    return None
+
+
+def _policy_days(data: dict[str, Any]) -> int | None:
+    raw = _first_scalar(
+        data,
+        ("window_days", "validity_days", "eligible_days", "deadline_days", "days"),
+    )
+    try:
+        days = int(raw)
+    except (TypeError, ValueError):
+        return None
+    return days if days in (7, 30) else days if days > 0 else None
+
+
+def _claim_supported(policy_data: dict[str, Any], claim: Claim) -> bool | None:
+    """Match a claim against explicit policy fields without guessing missing data."""
+
+    text = _request_text(policy_data)
+    topic = claim.topic.casefold()
+    positive = ("eligible", "covered", "allowed", "valid", "applies", "supported")
+    negative = ("ineligible", "excluded", "not covered", "not allowed", "invalid")
+    if topic and topic in text:
+        if any(term in text for term in negative):
+            return False
+        if any(term in text for term in positive):
+            return True
+    return None
+
+
+async def run_policy_worker(
+    plan: CasePlan,
+    context: InvestigationContext,
+    entity: EntityResolution,
+    shipment_analysis: dict[str, Any] | None = None,
+    payment_analysis: dict[str, Any] | None = None,
+) -> PolicyAnalysis:
+    """Evaluate claims using the policy MCP source and task 3/4 observations.
+
+    Task 3 and 4 results are context for policy validation only. The worker does
+    not duplicate their MCP calls, and missing observations remain unresolved.
+    """
+
+    context.trace.emit(
+        case_id=plan.case_id,
+        event_type="task_assigned",
+        actor="coordinator",
+        target="policy-worker",
+        decision_code="CHECK_POLICY",
+        attributes={"claim_count": len(plan.claims)},
+    )
+    if entity.status != "resolved" or len(entity.resolved_order_ids) != 1:
+        result = PolicyAnalysis("insufficient_evidence", None, (), (), ("ENTITY_UNRESOLVED",))
+    else:
+        order_id = entity.resolved_order_ids[0]
+        try:
+            evidence = await context.call("policy-worker", "get_policy", order_id=order_id)
+        except (RuntimeError, ValueError):
+            result = PolicyAnalysis("insufficient_evidence", None, (), (), ("POLICY_UNAVAILABLE",))
+        else:
+            data = _evidence_data(evidence)
+            days = _policy_days(data)
+            assessments: list[dict[str, Any]] = []
+            reasons: list[str] = []
+            for claim in plan.claims:
+                supported = _claim_supported(data, claim)
+                if supported is True:
+                    verdict, confidence = "supported", 0.85
+                elif supported is False:
+                    verdict, confidence = "unsupported", 0.85
+                else:
+                    verdict, confidence = "insufficient_evidence", 0.3
+                assessments.append(
+                    {
+                        "claim_id": claim.claim_id,
+                        "verdict": verdict,
+                        "confidence": confidence,
+                        "evidence_refs": [evidence["evidence_ref"]],
+                    }
+                )
+                reasons.append(f"{claim.claim_id}:{verdict.upper()}")
+
+            # These observations are deliberately consulted, not overridden: the
+            # policy source remains authoritative for eligibility and windows.
+            if days is None:
+                reasons.append("POLICY_WINDOW_UNSPECIFIED")
+            if shipment_analysis is not None and not shipment_analysis:
+                reasons.append("SHIPMENT_ANALYSIS_EMPTY")
+            if payment_analysis is not None and not payment_analysis:
+                reasons.append("PAYMENT_ANALYSIS_EMPTY")
+            status = "eligible" if assessments and all(
+                item["verdict"] == "supported" for item in assessments
+            ) else "not_eligible" if assessments and all(
+                item["verdict"] == "unsupported" for item in assessments
+            ) else "partially_supported" if assessments else "insufficient_evidence"
+            result = PolicyAnalysis(
+                status, days, tuple(assessments), (evidence["evidence_ref"],), tuple(reasons)
+            )
+
+    context.trace.emit(
+        case_id=plan.case_id,
+        event_type="policy_decided",
+        actor="policy-worker",
+        target="coordinator",
+        decision_code=result.status.upper(),
+        evidence_refs=list(result.evidence_refs) or None,
+        attributes={"applicable_days": result.applicable_days},
+    )
+    return result
+
+
+policy_worker = run_policy_worker
 
 
 async def resolve_entity(plan: CasePlan, context: InvestigationContext) -> EntityResolution:
