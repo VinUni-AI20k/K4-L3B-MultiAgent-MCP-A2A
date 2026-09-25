@@ -16,16 +16,22 @@ class EvidenceGateway:
     def __init__(self, session: ClientSession, contracts: Contracts) -> None:
         self._session = session
         self._contracts = contracts
+        self._tools: set[str] | None = None
 
     async def list_tools(self) -> list[str]:
         response = await self._session.list_tools()
-        return sorted(tool.name for tool in response.tools)
+        self._tools = {tool.name for tool in response.tools}
+        return sorted(self._tools)
 
     async def call(self, tool_name: str, *, case_id: str, **arguments: str) -> dict[str, Any]:
         if not isinstance(tool_name, str) or not tool_name.strip():
             raise ValueError("MCP tool name must be non-empty")
         if not isinstance(case_id, str) or not case_id.strip():
             raise ValueError("MCP case_id must be non-empty")
+        if self._tools is None:
+            await self.list_tools()
+        if tool_name not in self._tools:
+            raise ValueError(f"MCP tool {tool_name} was not discovered on this Gateway")
         payload = {"case_id": case_id, **arguments}
         result = await self._session.call_tool(tool_name, arguments=payload)
         is_error = getattr(result, "is_error", None)
