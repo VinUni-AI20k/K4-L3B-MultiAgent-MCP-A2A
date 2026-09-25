@@ -1,18 +1,26 @@
+"""Day09 L3B Multi-Agent Workflow Entrypoint."""
+
 from __future__ import annotations
 
 from typing import Any
 
 from .mcp_gateway import EvidenceGateway
+from .pipeline.coordinator import CoordinatorAgent
 from .trace import TraceWriter
 
 
 async def solve_case(
     case: dict[str, Any], gateway: EvidenceGateway, trace: TraceWriter
 ) -> dict[str, Any]:
-    """Implement the L3B coordinator and specialist-agent workflow here.
+    """Execute the Day09 L3B Multi-Agent Google ADK pipeline.
 
-    Include entity resolution, conflict handling and evidence-efficient investigation.
-    The starter kit intentionally does not generate invented fallback answers.
+    Orchestrates:
+    1. Coordinator: Entity resolution and specialist routing.
+    2. Order/Item Agent: Product catalog and order validation.
+    3. Shipment Agent: Delivery timelines, milestones, and delays.
+    4. Payment Agent: Transaction reconciliation, refunds, and duplicate charges.
+    5. Policy Agent: Gemini Flash Lite dispute adjudication and conflict resolution.
+    6. Verifier Agent: Invariants, schema validation, and evidence provenance audit.
     """
-    del case, gateway, trace
-    raise NotImplementedError("Implement the L3B multi-agent workflow in solve_case()")
+    coordinator = CoordinatorAgent(gateway, trace, trace.contracts)
+    return await coordinator.solve(case)
