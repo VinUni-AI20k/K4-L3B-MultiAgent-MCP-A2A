@@ -8,6 +8,7 @@ from typing import Any
 import httpx2
 from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
+from mcp.types import PaginatedRequestParams
 
 from .contracts import Contracts
 
@@ -18,10 +19,26 @@ class EvidenceGateway:
         self._contracts = contracts
 
     async def list_tools(self) -> list[str]:
-        response = await self._session.list_tools()
-        return sorted(tool.name for tool in response.tools)
+        return sorted(await self.discover_tools())
 
-    async def call(self, tool_name: str, *, case_id: str, **arguments: str) -> dict[str, Any]:
+    async def discover_tools(self) -> dict[str, dict[str, Any]]:
+        tools = {}
+        cursor = None
+        seen = set()
+        while True:
+            response = await self._session.list_tools(
+                params=PaginatedRequestParams(cursor=cursor) if cursor else None
+            )
+            for tool in response.tools:
+                tools[tool.name] = tool.inputSchema
+            cursor = response.nextCursor
+            if not cursor:
+                return tools
+            if cursor in seen:
+                raise RuntimeError("Repeated MCP discovery cursor")
+            seen.add(cursor)
+
+    async def call(self, tool_name: str, *, case_id: str, **arguments: Any) -> dict[str, Any]:
         payload = {"case_id": case_id, **arguments}
         result = await self._session.call_tool(tool_name, arguments=payload)
         if result.isError:
