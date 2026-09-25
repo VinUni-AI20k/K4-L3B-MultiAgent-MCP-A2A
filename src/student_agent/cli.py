@@ -5,7 +5,9 @@ import asyncio
 import json
 import sys
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
+from .bedrock_model import BedrockIssueModel
 from .cases import load_case_set
 from .config import Settings
 from .contracts import Contracts
@@ -19,45 +21,58 @@ def _root(value: str) -> Path:
     return Path(value).resolve()
 
 
-async def _show_tools(root: Path) -> None:
+async def _show_tools(root: Path, details: bool = False) -> None:
     settings = Settings.load(root)
     contracts = Contracts(root / "contracts" / "schemas")
     async with connect_gateway(settings.mcp_endpoint, settings.team_api_key, contracts) as gateway:
-        for tool in await gateway.list_tools():
-            print(tool)
+        if details:
+            print(json.dumps(await gateway.describe_tools(), ensure_ascii=False, indent=2))
+        else:
+            for tool in await gateway.list_tools():
+                print(tool)
 
 
 async def _run(root: Path) -> None:
     settings = Settings.load(root)
     case_set = load_case_set(root)
+    try:
+        model = BedrockIssueModel()
+    except ValueError as exc:
+        print(f"Warning: Bedrock not configured ({exc}), will skip conflict resolution", file=sys.stderr)
+        model = None
     contracts = Contracts(root / "contracts" / "schemas")
     output_root = root / "outputs"
     trace_path = root / "traces" / "trace.jsonl"
     output_root.mkdir(parents=True, exist_ok=True)
     trace_path.parent.mkdir(parents=True, exist_ok=True)
-    for stale in output_root.glob("*.json"):
-        stale.unlink()
-    trace_path.unlink(missing_ok=True)
-    trace = TraceWriter(trace_path, contracts)
 
     async with connect_gateway(settings.mcp_endpoint, settings.team_api_key, contracts) as gateway:
         discovered_tools = await gateway.list_tools()
         if not discovered_tools:
             raise RuntimeError("MCP Gateway returned no tools")
-        for case_id in case_set.case_ids:
-            case = case_set.cases[case_id]
-            trace.emit(case_id=case_id, event_type="case_received", actor="coordinator")
-            output = await solve_case(case, gateway, trace)
-            contracts.validate_output(output, f"outputs/{case_id}.json")
-            if output.get("case_id") != case_id:
-                raise ValueError(f"solver returned a mismatched case_id for {case_id}")
-            target = output_root / f"{case_id}.json"
-            temporary = target.with_suffix(".json.tmp")
-            temporary.write_text(
-                json.dumps(output, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
-            )
-            temporary.replace(target)
-            trace.emit(case_id=case_id, event_type="case_finalized", actor="coordinator")
+        with TemporaryDirectory(prefix=".day09-run-", dir=root) as stage_dir:
+            staged_output_root = Path(stage_dir) / "outputs"
+            staged_output_root.mkdir()
+            staged_trace_path = Path(stage_dir) / "trace.jsonl"
+            trace = TraceWriter(staged_trace_path, contracts)
+            for case_id in case_set.case_ids:
+                case = case_set.cases[case_id]
+                trace.emit(case_id=case_id, event_type="case_received", actor="coordinator")
+                output = await solve_case(case, gateway, trace, model=model)
+                contracts.validate_output(output, f"outputs/{case_id}.json")
+                if output.get("case_id") != case_id:
+                    raise ValueError(f"solver returned a mismatched case_id for {case_id}")
+                target = staged_output_root / f"{case_id}.json"
+                target.write_text(
+                    json.dumps(output, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+                )
+                trace.emit(case_id=case_id, event_type="case_finalized", actor="coordinator")
+
+            for stale in output_root.glob("*.json"):
+                stale.unlink()
+            for completed in staged_output_root.glob("*.json"):
+                completed.replace(output_root / completed.name)
+            staged_trace_path.replace(trace_path)
 
 
 def parser() -> argparse.ArgumentParser:
@@ -65,7 +80,8 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--root", default=".", help="repository root (default: current directory)")
     commands = result.add_subparsers(dest="command", required=True)
     commands.add_parser("validate-inputs", help="validate case-set.json and all 100 inputs")
-    commands.add_parser("mcp-tools", help="authenticate and list discovered MCP tools")
+    mcp_tools = commands.add_parser("mcp-tools", help="authenticate and list discovered MCP tools")
+    mcp_tools.add_argument("--details", action="store_true", help="show tool input schemas")
     commands.add_parser("run", help="run the implemented workflow for all cases")
     commands.add_parser("validate", help="validate outputs and observable trace")
     package = commands.add_parser("package", help="validate and build the submission ZIP")
@@ -80,11 +96,10 @@ def main() -> None:
         if args.command == "validate-inputs":
             case_set = load_case_set(root)
             print(
-                f"OK: {case_set.variant_id} / {case_set.version} / "
-                f"{len(case_set.case_ids)} cases"
+                f"OK: {case_set.variant_id} / {case_set.version} / {len(case_set.case_ids)} cases"
             )
         elif args.command == "mcp-tools":
-            asyncio.run(_show_tools(root))
+            asyncio.run(_show_tools(root, args.details))
         elif args.command == "run":
             asyncio.run(_run(root))
         elif args.command == "validate":
@@ -98,6 +113,12 @@ def main() -> None:
     except (OSError, RuntimeError, ValueError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         raise SystemExit(1) from exc
+    except ExceptionGroup as exc:
+        detail: Exception = exc
+        while isinstance(detail, ExceptionGroup):
+            detail = detail.exceptions[0]
+        print(f"ERROR: {detail}", file=sys.stderr)
+        raise SystemExit(1) from None
 
 
 if __name__ == "__main__":
