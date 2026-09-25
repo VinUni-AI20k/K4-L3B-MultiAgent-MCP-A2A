@@ -44,6 +44,7 @@ async def _run(root: Path) -> None:
         discovered_tools = await gateway.list_tools()
         if not discovered_tools:
             raise RuntimeError("MCP Gateway returned no tools")
+        gateway.available_tools = frozenset(discovered_tools)
         for case_id in case_set.case_ids:
             case = case_set.cases[case_id]
             trace.emit(case_id=case_id, event_type="case_received", actor="coordinator")
@@ -57,7 +58,17 @@ async def _run(root: Path) -> None:
                 json.dumps(output, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
             )
             temporary.replace(target)
-            trace.emit(case_id=case_id, event_type="case_finalized", actor="coordinator")
+            trace.emit(
+                case_id=case_id,
+                event_type="case_finalized",
+                actor="coordinator",
+                attributes={
+                    "total_evidence": len(output.get("evidence_refs", [])),
+                    "conflicts_found": len(output.get("data_conflicts", [])),
+                    "verified": output.get("assessment", {}).get("case_status")
+                    != "needs_investigation",
+                },
+            )
 
 
 def parser() -> argparse.ArgumentParser:
@@ -80,8 +91,7 @@ def main() -> None:
         if args.command == "validate-inputs":
             case_set = load_case_set(root)
             print(
-                f"OK: {case_set.variant_id} / {case_set.version} / "
-                f"{len(case_set.case_ids)} cases"
+                f"OK: {case_set.variant_id} / {case_set.version} / {len(case_set.case_ids)} cases"
             )
         elif args.command == "mcp-tools":
             asyncio.run(_show_tools(root))
