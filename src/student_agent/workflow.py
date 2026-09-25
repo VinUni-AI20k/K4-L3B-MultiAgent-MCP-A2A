@@ -54,6 +54,7 @@ async def solve_case_direct(
         order_res=order_output,
     )
 
+    # 6. Verifier Agent (Cross-field Consistency & Confidence Calibration)
     verifier_agent = VerifierAgent(ctx)
     verified_policy = verifier_agent.verify_and_finalize(
         entity_output=entity_output,
