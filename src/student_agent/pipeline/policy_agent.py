@@ -110,11 +110,11 @@ class PolicyAgent:
             )
             for model_to_try in [self.model_name, self.fallback_model]:
                 try:
-                    response = await self.client.aio.models.generate_content(
+                    chat = self.client.aio.chats.create(
                         model=model_to_try,
-                        contents=user_prompt,
                         config=config,
                     )
+                    response = await chat.send_message(user_prompt)
                     gemini_draft = AdjudicationDraft.model_validate_json(response.text)
                     break
                 except Exception:

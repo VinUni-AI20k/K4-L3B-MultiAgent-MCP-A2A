@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -23,23 +24,46 @@ class EvidenceGateway:
 
     async def call(self, tool_name: str, *, case_id: str, **arguments: str) -> dict[str, Any]:
         payload = {"case_id": case_id, **arguments}
-        result = await self._session.call_tool(tool_name, arguments=payload)
-        is_error = getattr(result, "is_error", getattr(result, "isError", False))
-        if is_error:
-            message = " ".join(
-                block.text for block in result.content if getattr(block, "text", None)
-            )
-            raise RuntimeError(f"MCP tool {tool_name} failed: {message or 'unknown error'}")
-        evidence = getattr(result, "structuredContent", None)
-        if evidence is None:
-            evidence = getattr(result, "structured_content", None)
-        if evidence is None:
-            text_blocks = [block.text for block in result.content if getattr(block, "text", None)]
-            if len(text_blocks) != 1:
-                raise ValueError(f"MCP tool {tool_name} did not return one evidence object")
-            evidence = json.loads(text_blocks[0])
-        self._contracts.validate_evidence(evidence, f"MCP tool {tool_name}")
-        return evidence
+        last_error: Exception | None = None
+        for attempt in range(3):
+            try:
+                result = await self._session.call_tool(tool_name, arguments=payload)
+                is_error = getattr(result, "is_error", getattr(result, "isError", False))
+                if is_error:
+                    msg_text = " ".join(
+                        block.text for block in result.content if getattr(block, "text", None)
+                    )
+                    err_msg = f"MCP tool {tool_name} failed: {msg_text or 'unknown error'}"
+                    if tool_name == "get_refund_timeline":
+                        raise RuntimeError(err_msg)
+                    last_error = RuntimeError(err_msg)
+                    if attempt < 2:
+                        await asyncio.sleep(0.5 * (attempt + 1))
+                        continue
+                    raise last_error
+                evidence = getattr(result, "structuredContent", None)
+                if evidence is None:
+                    evidence = getattr(result, "structured_content", None)
+                if evidence is None:
+                    text_blocks = [
+                        block.text for block in result.content if getattr(block, "text", None)
+                    ]
+                    if len(text_blocks) != 1:
+                        raise ValueError(f"MCP tool {tool_name} did not return one evidence object")
+                    evidence = json.loads(text_blocks[0])
+                self._contracts.validate_evidence(evidence, f"MCP tool {tool_name}")
+                return evidence
+            except Exception as exc:
+                if tool_name == "get_refund_timeline":
+                    raise
+                last_error = exc
+                if attempt < 2:
+                    await asyncio.sleep(0.5 * (attempt + 1))
+                else:
+                    raise last_error from exc
+        if last_error:
+            raise last_error
+        raise RuntimeError(f"MCP tool {tool_name} failed unexpectedly")
 
 
 @asynccontextmanager
