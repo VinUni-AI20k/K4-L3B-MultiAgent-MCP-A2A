@@ -218,13 +218,11 @@ def test_solve_case_happy_path(
 
     # Verifier completed PASS
     verif_events = [e for e in events if e["event_type"] == "verification_completed"]
-    assert len(verif_events) == 1
-    assert verif_events[0]["decision_code"] == "PASS"
+    assert [e["decision_code"] for e in verif_events] == ["ISSUE_MISMATCH", "PASS"]
 
     # Policy decided code matches primary_issue
     policy_events = [e for e in events if e["event_type"] == "policy_decided"]
-    assert len(policy_events) == 1
-    assert policy_events[0]["decision_code"] == "late_delivery_logistics"
+    assert policy_events[-1]["decision_code"] == "late_delivery_logistics"
 
     # Entity resolved handoff
     entity_handoff = [
@@ -298,8 +296,8 @@ def test_solve_case_handles_tool_failure_gracefully(
     base_case: dict[str, Any],
     fake_evidence: dict[str, dict[str, Any]],
 ) -> None:
-    # Simulate get_product_context failing with RuntimeError
-    fake_evidence["get_product_context"] = RuntimeError("Product DB timeout")  # type: ignore[assignment]
+    # Simulate get_order_items failing with RuntimeError
+    fake_evidence["get_order_items"] = RuntimeError("Items DB timeout")  # type: ignore[assignment]
 
     trace_path = tmp_path / "trace.jsonl"
     trace = TraceWriter(trace_path, contracts)
@@ -313,4 +311,6 @@ def test_solve_case_handles_tool_failure_gracefully(
         e.get("tool_name") for e in events if e["event_type"] == "tool_result_consumed"
     ]
     # Failed tool should not have emitted tool_result_consumed
-    assert "get_product_context" not in consumed_tools
+    assert "get_order_items" not in consumed_tools
+    failed = [e for e in events if e.get("decision_code") == "TOOL_CALL_FAILED"]
+    assert [e["tool_name"] for e in failed] == ["get_order_items"]

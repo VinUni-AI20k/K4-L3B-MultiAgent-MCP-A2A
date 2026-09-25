@@ -78,12 +78,9 @@ def _extract_order_rows(data: Any) -> list[dict[str, Any]]:
     return []
 
 
-def analyze_case(case: dict[str, Any], ev: dict[str, dict[str, Any] | None]) -> dict[str, Any]:
-    """Pure rule-based analysis returning l3b-output-v2 compliant payload."""
+def _incident(case: dict[str, Any], ev: dict[str, dict[str, Any] | None]) -> dict[str, Any]:
+    """Entity resolution + incident window selection (decoy rows excluded)."""
     claimed_order_id = (case.get("customer_request") or {}).get("claimed_order_id")
-    candidate_order_ids = case.get("candidate_order_ids") or []
-    claims = (case.get("customer_request") or {}).get("claims") or []
-    claim_topics = [c.get("topic") for c in claims if isinstance(c, dict)]
 
     history_data = _get_env_data(ev, "get_customer_history")
     history_rows = _extract_order_rows(history_data)
@@ -203,6 +200,79 @@ def analyze_case(case: dict[str, Any], ev: dict[str, dict[str, Any] | None]) -> 
                 })
                 if len(conflicts) >= 5:
                     break
+
+    return {
+        "history_order_ids": history_order_ids,
+        "res_status": res_status,
+        "resolved_order_ids": resolved_order_ids,
+        "res_confidence": res_confidence,
+        "target_order_id": target_order_id,
+        "selected_row": selected_row,
+        "window_start": window_start_dt,
+        "window_end": window_end_dt,
+        "conflicts": conflicts,
+    }
+
+
+def _window_rows(data: Any, key: str, ts_field: str, start: Any, end: Any) -> list[dict]:
+    rows = data.get(key, []) if isinstance(data, dict) else (data if key == "events" else [])
+    if not isinstance(rows, list):
+        return []
+    return [r for r in rows if isinstance(r, dict) and _in_window(r.get(ts_field), start, end)]
+
+
+def scoped_evidence(case: dict[str, Any], ev: dict[str, dict[str, Any] | None]) -> dict[str, Any]:
+    """Evidence restricted to the selected incident window, for LLM specialists.
+
+    Decoy snapshots of the same order are dropped here, so prompts stay small and the
+    model never has to guess which occurrence the complaint is about.
+    """
+    inc = _incident(case, ev)
+    start, end = inc["window_start"], inc["window_end"]
+    items = _get_env_data(ev, "get_order_items")
+    if isinstance(items, dict):
+        items = items.get("items") or items.get("order_items") or []
+    pay = _get_env_data(ev, "get_payment_timeline")
+    ship = _get_env_data(ev, "get_shipment_summary")
+    policy = _get_env_data(ev, "get_policy")
+    return {
+        "incident_order": inc["selected_row"],
+        "incident_window": [str(start) if start else None, str(end) if end else None],
+        "items": [
+            it for it in (items if isinstance(items, list) else [])
+            if isinstance(it, dict) and _in_window(it.get("shipping_limit_date"), start, end)
+        ],
+        "payments": pay.get("payments", []) if isinstance(pay, dict) else [],
+        "payment_events": _window_rows(pay, "events", "event_at", start, end),
+        "shipment_events": _window_rows(ship, "events", "event_at", start, end),
+        "shipping_limits": _window_rows(ship, "shipping_limits", "shipping_limit_at", start, end),
+        "refund_events": _window_rows(
+            _get_env_data(ev, "get_refund_timeline"), "events", "event_at", start, end
+        ),
+        "policy_rules": policy.get("rules", {}) if isinstance(policy, dict) else {},
+        "missing_tools": sorted(tool for tool, env in ev.items() if env is None),
+    }
+
+
+def analyze_case(
+    case: dict[str, Any],
+    ev: dict[str, dict[str, Any] | None],
+    issue_override: str | None = None,
+) -> dict[str, Any]:
+    """Pure rule-based analysis returning l3b-output-v2 compliant payload."""
+    candidate_order_ids = case.get("candidate_order_ids") or []
+    claims = (case.get("customer_request") or {}).get("claims") or []
+    claim_topics = [c.get("topic") for c in claims if isinstance(c, dict)]
+
+    inc = _incident(case, ev)
+    history_order_ids = inc["history_order_ids"]
+    res_status = inc["res_status"]
+    resolved_order_ids = inc["resolved_order_ids"]
+    res_confidence = inc["res_confidence"]
+    target_order_id = inc["target_order_id"]
+    selected_row = inc["selected_row"]
+    window_start_dt, window_end_dt = inc["window_start"], inc["window_end"]
+    conflicts = inc["conflicts"]
 
     # Window items (filter by shipping_limit_date in window)
     items_data = _get_env_data(ev, "get_order_items")
@@ -507,6 +577,10 @@ def analyze_case(case: dict[str, Any], ev: dict[str, dict[str, Any] | None]) -> 
             )
             if is_late_logistics:
                 issue = "late_delivery_logistics"
+
+    # LLM coordinator decision wins; the evidence gating below still applies
+    if issue_override:
+        issue = issue_override
 
     # 7. required evidence missing → insufficient_evidence
     if issue is None:

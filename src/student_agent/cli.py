@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import argparse
-import contextlib
 import asyncio
+import contextlib
 import json
 import os
 import sys
@@ -12,6 +12,7 @@ from .analysis import analyze_case
 from .cases import load_case_set
 from .config import Settings
 from .contracts import Contracts
+from .llm_agents import LLMAgents
 from .mcp_gateway import connect_gateway
 from .submission import package_submission, validate_artifacts
 from .trace import TraceWriter
@@ -32,6 +33,8 @@ async def _show_tools(root: Path) -> None:
 
 async def _run(root: Path) -> None:
     settings = Settings.load(root)
+    if LLMAgents.from_env() is None:
+        raise RuntimeError("OPENAI_API_KEY missing: the workflow is decided by LLM agents")
     case_set = load_case_set(root)
     contracts = Contracts(root / "contracts" / "schemas")
     output_root = root / "outputs"
@@ -63,13 +66,20 @@ async def _run(root: Path) -> None:
         discovered_tools = await gateway.list_tools()
         if not discovered_tools:
             raise RuntimeError("MCP Gateway returned no tools")
-        for case_id in case_set.case_ids:
-            if case_id in done:
-                continue
+        only = {c for c in os.environ.get("DAY09_CASES", "").split(",") if c}
+        # cases are independent (evidence never shared), so run a bounded number at once
+        limit = asyncio.Semaphore(max(1, int(os.environ.get("DAY09_CONCURRENCY", "4"))))
+        pending = [
+            case_id for case_id in case_set.case_ids
+            if case_id not in done and not (only and case_id not in only)
+        ]
+
+        async def solve_one(case_id: str) -> None:
             case = case_set.cases[case_id]
             trace.emit(case_id=case_id, event_type="case_received", actor="coordinator")
             try:
-                output = await solve_case(case, gateway, trace)
+                async with limit:
+                    output = await solve_case(case, gateway, trace)
                 contracts.validate_output(output, f"outputs/{case_id}.json")
             except Exception as exc:  # one bad case must not sink the other 99
                 print(f"WARN: {case_id} fell back: {exc!r}", file=sys.stderr)
@@ -85,6 +95,7 @@ async def _run(root: Path) -> None:
             temporary.replace(target)
             trace.emit(case_id=case_id, event_type="case_finalized", actor="coordinator")
 
+        await asyncio.gather(*(solve_one(case_id) for case_id in pending))
 
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(description="Day09 L3B student workflow")
