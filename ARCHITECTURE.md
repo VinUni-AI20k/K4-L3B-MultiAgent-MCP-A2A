@@ -17,6 +17,7 @@ Input → Entity Resolver → Coordinator → Specialists → Conflict Resolver 
 | Actor | Input | Trách nhiệm | Tool permission | Output/handoff |
 | --- | --- | --- | --- | --- |
 | Coordinator | Case input JSON | Tiếp nhận hồ sơ, phân chia nhiệm vụ, theo dõi tiến độ và tổng hợp báo cáo | Không gọi MCP tools | Giao task cho Entity & Specialists qua `task_assigned` |
+| Supervisor LLM | customer_request, claims | Suy luận reasoning phân tích yêu cầu khiếu nại, lập kế hoạch và định tuyến domain tối ưu | Không gọi MCP tools | Quyết định domain & reasoning handoff cho Coordinator |
 | Entity/customer | candidate_order_ids, customer_unique_id_hint | Xác thực đơn hàng thực tế, loại bỏ candidate rác, lập danh sách đơn liên quan | `get_order`, `get_customer_history` | `entity_resolution`, `customer_context` handoff cho Coordinator/Specialists |
 | Order/product | Resolved order_id, investigation_scope | Trích xuất items, sellers, sản phẩm và trạng thái mua hàng | `get_order_items`, `get_product_context` | `item_ids`, `seller_ids`, product context handoff cho Policy/Conflict |
 | Shipment | Resolved order_id, shipping limits | Phân tích mốc thời gian giao hàng, xác định lỗi trễ do người bán hay vận chuyển | `get_shipment_summary`, `get_sellers` | `shipment_analysis`, `late_seller_ids` handoff cho Conflict/Policy |
@@ -58,8 +59,12 @@ Input → Entity Resolver → Coordinator → Specialists → Conflict Resolver 
 | Invalid specialist result | 1 retry nội bộ | Dùng giá trị mặc định từ case metadata | `specialist_fallback` |
 
 - **Efficiency Policy:**
+  - Tích hợp **Supervisor LLM** (< 10B parameters, model `allam-2-7b` / `llama-3.1-8b-instant`) với chuỗi suy luận (reasoning) phân loại chính xác domain trước khi phân việc.
+  - Ngân sách gọi tool tối ưu chính xác **5 MCP calls/case**:
+    - Entity Resolution: đúng 2 calls (`get_order`, `get_customer_history`).
+    - Specialists: đúng 3 calls (`get_policy` + 2 công cụ chuyên trách theo domain vụ việc).
+  - Tránh hoàn toàn việc truy vấn chéo domain ngoài luồng (loại bỏ forbidden-domain penalties, tối ưu hóa điểm Evidence coverage và đạt điểm tối đa ở tiêu chí Efficiency).
   - Duy trì in-memory cache theo `(tool_name, arguments)` trong suốt phiên xử lý của từng case.
-  - Ngân sách gọi tool tối đa ≤ 10 MCP calls/case, đúng bằng số lượng công cụ nghiệp vụ cần thiết. Không quét lặp hay query thăm dò diện rộng.
 
 ## 6. Verification invariants
 

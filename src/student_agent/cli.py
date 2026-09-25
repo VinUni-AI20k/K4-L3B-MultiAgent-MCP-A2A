@@ -3,8 +3,10 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
-import sys
 from pathlib import Path
+import sys
+
+import httpx2
 
 from .cases import load_case_set
 from .config import Settings
@@ -43,6 +45,21 @@ async def _run(root: Path) -> None:
     batch_size = 10
     case_ids = list(case_set.case_ids)
     total_cases = len(case_ids)
+
+    # Ensure an active competition run session exists for MCP auditing
+    try:
+        async with httpx2.AsyncClient() as http_client:
+            resp = await http_client.post(
+                f"{settings.competition_api_url}/api/v2/runs",
+                headers={"Authorization": f"Bearer {settings.team_api_key}", "Content-Type": "application/json"},
+                json={"variant_id": "l3b"},
+                timeout=10.0,
+            )
+            if resp.status_code == 200:
+                run_data = resp.json()
+                print(f"Active run session initialized (expires: {run_data.get('expires_at')})")
+    except Exception as exc:
+        print(f"Notice: run initialization check skipped ({exc})")
 
     for i in range(0, total_cases, batch_size):
         chunk = case_ids[i : i + batch_size]
