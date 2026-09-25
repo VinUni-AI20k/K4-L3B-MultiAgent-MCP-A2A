@@ -140,6 +140,9 @@ class PaymentFindings(BaseModel):
     has_mismatch: bool = False
     has_pending_refund: bool = False
     has_failed_refund: bool = False
+    duplicate_amount_brl: float = 0.0
+    mismatch_amount_brl: float = 0.0
+    failed_refund_amount_brl: float = 0.0
     evidence_refs: list[str] = Field(default_factory=list)
 
 

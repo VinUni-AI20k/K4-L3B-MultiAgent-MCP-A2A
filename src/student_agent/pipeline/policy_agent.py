@@ -139,7 +139,7 @@ class PolicyAgent:
         else:
             refund_brl = float(rule.get("refund_brl", 0.0))
 
-            # Ground with actual seller freight if available
+            # Ground with actual specialist telemetry when available
             if primary_issue == "late_delivery_seller":
                 target_seller = (
                     shipment_findings.late_seller_ids[0]
@@ -152,6 +152,18 @@ class PolicyAgent:
                     )
                     if seller_freight > 0:
                         refund_brl = seller_freight
+            elif primary_issue == "late_delivery_logistics":
+                if order_findings.total_freight_brl > 0:
+                    refund_brl = order_findings.total_freight_brl
+            elif primary_issue == "duplicate_charge":
+                if payment_findings.duplicate_amount_brl > 0:
+                    refund_brl = payment_findings.duplicate_amount_brl
+            elif primary_issue == "payment_mismatch":
+                if payment_findings.mismatch_amount_brl > 0:
+                    refund_brl = payment_findings.mismatch_amount_brl
+            elif primary_issue == "refund_failed":
+                if payment_findings.failed_refund_amount_brl > 0:
+                    refund_brl = payment_findings.failed_refund_amount_brl
 
             # Financial consistency check: refund cannot exceed captured amount
             max_refundable = (

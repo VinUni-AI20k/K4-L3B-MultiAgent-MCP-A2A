@@ -119,9 +119,14 @@ class CoordinatorAgent:
         )
 
         # 3. Parallel Specialist Execution
+        claims = case.get("customer_request", {}).get("claims", [])
+        claimed_topics = [c.get("topic") for c in claims if c.get("topic")]
+
         order_task = self.order_agent.investigate(case_id, resolved_order_id, scope, context)
         shipment_task = self.shipment_agent.investigate(case_id, resolved_order_id, context)
-        payment_task = self.payment_agent.investigate(case_id, resolved_order_id, context)
+        payment_task = self.payment_agent.investigate(
+            case_id, resolved_order_id, context, claimed_topics=claimed_topics
+        )
 
         order_findings, shipment_findings, payment_findings = await asyncio.gather(
             order_task, shipment_task, payment_task

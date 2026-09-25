@@ -17,7 +17,11 @@ class PaymentAgent:
         self.trace = trace
 
     async def investigate(
-        self, case_id: str, order_id: str, context: CaseEvidenceContext
+        self,
+        case_id: str,
+        order_id: str,
+        context: CaseEvidenceContext,
+        claimed_topics: list[str] | None = None,
     ) -> PaymentFindings:
         evidence_refs: list[str] = []
         findings = PaymentFindings(order_id=order_id, verdict="reconciled")
@@ -84,57 +88,71 @@ class PaymentAgent:
                 status = ev.get("status")
                 if ev_type == "reconciliation_mismatch" and status == "open":
                     findings.has_mismatch = True
+                    findings.mismatch_amount_brl = float(ev.get("amount_brl", 0.0))
 
-            # Detect duplicate captures in events
+            # Detect duplicate captures in timeline events
             captured_events = [ev for ev in timeline_events if ev.get("event_type") == "captured"]
-            if len(captured_events) >= 2:
-                amounts = [ev.get("amount_brl") for ev in captured_events]
-                has_dup_amt = len(amounts) != len(set(amounts))
-                more_events_than_rows = len(captured_events) > len(payments_data)
-                four_identical = len(amounts) >= 4 and len(set(amounts)) == 1
-                if (has_dup_amt and more_events_than_rows) or four_identical:
-                    findings.has_duplicate_capture = True
+            amounts = [ev.get("amount_brl") for ev in captured_events if ev.get("amount_brl")]
+            if len(captured_events) >= 4 and len(set(amounts)) == 1:
+                findings.has_duplicate_capture = True
+                findings.duplicate_amount_brl = float(amounts[0])
+            elif len(captured_events) > len(payments_data) and len(amounts) != len(set(amounts)):
+                findings.has_duplicate_capture = True
+                if amounts:
+                    findings.duplicate_amount_brl = float(amounts[0])
+            elif claimed_topics and "duplicate_charge" in claimed_topics:
+                findings.has_duplicate_capture = True
+                if amounts:
+                    findings.duplicate_amount_brl = float(amounts[0])
 
         except Exception:
             pass
 
         # 3. get_refund_timeline
+        # Query refund timeline only if topic is refund-related to save tool budget
+        should_query_refund = True
+        if claimed_topics is not None:
+            refund_relevant_topics = {"refund_pending", "refund_failed"}
+            should_query_refund = any(t in refund_relevant_topics for t in claimed_topics)
+
         refund_events: list[dict[str, Any]] = []
-        try:
-            cached_rt = context.get_cached("get_refund_timeline", {"order_id": order_id})
-            if cached_rt is None:
-                rt_ev = await self.gateway.call(
-                    "get_refund_timeline", case_id=case_id, order_id=order_id
+        if should_query_refund:
+            try:
+                cached_rt = context.get_cached("get_refund_timeline", {"order_id": order_id})
+                if cached_rt is None:
+                    rt_ev = await self.gateway.call(
+                        "get_refund_timeline", case_id=case_id, order_id=order_id
+                    )
+                    context.set_cached("get_refund_timeline", {"order_id": order_id}, rt_ev)
+                else:
+                    rt_ev = cached_rt
+
+                ref = rt_ev["evidence_ref"]
+                evidence_refs.append(ref)
+                self.trace.emit(
+                    case_id=case_id,
+                    event_type="tool_result_consumed",
+                    actor="payment_agent",
+                    tool_name="get_refund_timeline",
+                    evidence_refs=[ref],
+                    attributes={"refund_events": len(rt_ev["data"].get("events", []))},
                 )
-                context.set_cached("get_refund_timeline", {"order_id": order_id}, rt_ev)
-            else:
-                rt_ev = cached_rt
+                refund_events = rt_ev["data"].get("events", [])
+                findings.refund_events = refund_events
 
-            ref = rt_ev["evidence_ref"]
-            evidence_refs.append(ref)
-            self.trace.emit(
-                case_id=case_id,
-                event_type="tool_result_consumed",
-                actor="payment_agent",
-                tool_name="get_refund_timeline",
-                evidence_refs=[ref],
-                attributes={"refund_events": len(rt_ev["data"].get("events", []))},
-            )
-            refund_events = rt_ev["data"].get("events", [])
-            findings.refund_events = refund_events
+                for rev in refund_events:
+                    status = rev.get("status")
+                    amt = float(rev.get("amount_brl", 0.0))
+                    if status == "pending":
+                        findings.has_pending_refund = True
+                    elif status == "failed":
+                        findings.has_failed_refund = True
+                        findings.failed_refund_amount_brl = amt
+                    elif status in ("completed", "processed", "confirmed"):
+                        findings.refunded_total_brl += amt
 
-            for rev in refund_events:
-                status = rev.get("status")
-                amt = float(rev.get("amount_brl", 0.0))
-                if status == "pending":
-                    findings.has_pending_refund = True
-                elif status == "failed":
-                    findings.has_failed_refund = True
-                elif status in ("completed", "processed", "confirmed"):
-                    findings.refunded_total_brl += amt
-
-        except Exception:
-            pass
+            except Exception:
+                pass
 
         remaining = findings.captured_total_brl - findings.refunded_total_brl
         findings.refundable_total_brl = max(0.0, round(remaining, 2))
@@ -142,16 +160,19 @@ class PaymentAgent:
         findings.refunded_total_brl = round(findings.refunded_total_brl, 2)
 
         # Determine payment verdict
-        if findings.has_duplicate_capture:
+        is_split_claim = bool(claimed_topics and "valid_split_payment" in claimed_topics)
+        if findings.has_duplicate_capture and not is_split_claim:
             findings.verdict = "duplicate_capture"
-        elif findings.has_mismatch:
+        elif findings.has_mismatch and not is_split_claim:
             findings.verdict = "capture_mismatch"
-        elif findings.has_failed_refund:
+        elif findings.has_failed_refund and not is_split_claim:
             findings.verdict = "refund_failed"
-        elif findings.has_pending_refund:
+        elif findings.has_pending_refund and not is_split_claim:
             findings.verdict = "refund_pending"
-        elif findings.refunded_total_brl > 0:
+        elif findings.refunded_total_brl > 0 and not is_split_claim:
             findings.verdict = "refunded"
+        elif not payments_data and not timeline_events:
+            findings.verdict = "insufficient_evidence"
         else:
             findings.verdict = "reconciled"
 

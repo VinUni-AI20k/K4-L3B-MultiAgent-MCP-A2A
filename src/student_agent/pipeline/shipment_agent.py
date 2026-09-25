@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from ..mcp_gateway import EvidenceGateway
 from ..trace import TraceWriter
 from .models import CaseEvidenceContext, ShipmentFindings
@@ -15,7 +17,11 @@ class ShipmentAgent:
         self.trace = trace
 
     async def investigate(
-        self, case_id: str, order_id: str, context: CaseEvidenceContext
+        self,
+        case_id: str,
+        order_id: str,
+        context: CaseEvidenceContext,
+        fallback_seller_ids: list[str] | None = None,
     ) -> ShipmentFindings:
         evidence_refs: list[str] = []
         findings = ShipmentFindings(order_id=order_id, verdict="on_time")
@@ -40,11 +46,12 @@ class ShipmentAgent:
                 evidence_refs=[ref],
                 attributes={"status": ship_ev["data"].get("order_status")},
             )
-            data = ship_ev["data"]
+            data: dict[str, Any] = ship_ev["data"]
             carrier_at = data.get("delivered_carrier_at")
             customer_at = data.get("delivered_customer_at")
             estimated_at = data.get("estimated_delivery_at")
-            limits = data.get("shipping_limits") or []
+            limits: list[dict[str, Any]] = data.get("shipping_limits") or []
+            events: list[dict[str, Any]] = data.get("events") or []
 
             findings.delivered_carrier_at = carrier_at
             findings.delivered_customer_at = customer_at
@@ -54,7 +61,18 @@ class ShipmentAgent:
             ship_id = data.get("shipment_id") or f"shipment-{order_id[:12]}"
             findings.shipment_ids = [ship_id]
 
-            # Evaluate seller handoff vs shipping limits
+            # 1. Inspect verified milestones from authoritative telemetry events
+            seller_delay_event = False
+            logistics_delay_event = False
+            for ev in events:
+                if ev.get("event_type") == "delivered_late" and ev.get("status") == "confirmed":
+                    actor = ev.get("actor")
+                    if actor == "seller":
+                        seller_delay_event = True
+                    elif actor == "logistics_provider":
+                        logistics_delay_event = True
+
+            # 2. Evaluate shipping limits and seller handoff
             late_sellers: list[str] = []
             for limit in limits:
                 limit_at = limit.get("shipping_limit_at")
@@ -68,17 +86,35 @@ class ShipmentAgent:
                 ):
                     late_sellers.append(seller_id)
 
-            findings.late_seller_ids = late_sellers
-            findings.is_seller_delay = len(late_sellers) > 0
+            if seller_delay_event and not late_sellers:
+                for limit in limits:
+                    sid = limit.get("seller_id")
+                    if sid and sid not in late_sellers:
+                        late_sellers.append(sid)
+                if not late_sellers and fallback_seller_ids:
+                    late_sellers.extend(fallback_seller_ids)
 
-            # Evaluate logistics carrier delivery vs estimated delivery date
-            if customer_at and estimated_at and customer_at > estimated_at:
-                findings.is_logistics_delay = True
+            # 3. Evaluate logistics carrier delivery vs estimated delivery date
+            is_logistics_delay_time = bool(
+                customer_at and estimated_at and customer_at > estimated_at
+            )
 
-            # Determine shipment verdict
-            if findings.is_seller_delay:
+            # 4. Final Verdict determination
+            if seller_delay_event:
+                findings.is_seller_delay = True
+                findings.late_seller_ids = late_sellers
                 findings.verdict = "seller_delay"
-            elif findings.is_logistics_delay:
+            elif logistics_delay_event:
+                findings.is_logistics_delay = True
+                findings.late_seller_ids = []
+                findings.verdict = "logistics_delay"
+            elif len(late_sellers) > 0:
+                findings.is_seller_delay = True
+                findings.late_seller_ids = late_sellers
+                findings.verdict = "seller_delay"
+            elif is_logistics_delay_time:
+                findings.is_logistics_delay = True
+                findings.late_seller_ids = []
                 findings.verdict = "logistics_delay"
             elif customer_at:
                 findings.verdict = "on_time"
@@ -93,6 +129,7 @@ class ShipmentAgent:
 
         except Exception:
             findings.verdict = "insufficient_evidence"
+            findings.late_seller_ids = []
 
         findings.evidence_refs = evidence_refs
         return findings
