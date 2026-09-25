@@ -62,10 +62,7 @@ def _script(coordinator: list[Any]) -> dict[str, list[Any]]:
             {"resolved_order_id": ORDER, "confidence": 0.9},
         ],
         "order-agent": [[("get_order_items", {"order_id": "x"})], {"issue": None}],
-        "shipment-agent": [
-            [("get_shipment_summary", {"order_id": "other"}), ("get_policy", {})],
-            {"issue": "late_delivery_logistics", "confidence": 0.8},
-        ],
+        "shipment-agent": [{"issue": "late_delivery_logistics", "confidence": 0.8}],
         "payment-agent": [{"issue": None}],
         "policy-agent": [[("get_policy", {})], {"issue": None}],
         "coordinator": coordinator,
@@ -77,7 +74,7 @@ def test_llm_agreement(tmp_path, contracts, base_case, fake_evidence) -> None:  
         _script([{"primary_issue": "late_delivery_logistics", "confidence": 0.9}]),
     )
     assert output["assessment"]["primary_issue"] == "late_delivery_logistics"
-    assert output["assessment"]["confidence"] == 0.9
+    assert output["assessment"]["confidence"] == 0.96  # agreed with verifier + 1 specialist vote
     # guardrails: forced identity, no candidate ids, pinned order, no cross-role tools
     for name, args in gateway.calls:
         assert args["case_id"] == base_case["case_id"]
@@ -103,15 +100,30 @@ def test_llm_agreement(tmp_path, contracts, base_case, fake_evidence) -> None:  
     assert all("tools" not in body for body in client.bodies)
     assert "get_product_context" not in names
 
-def test_llm_decision_is_final(tmp_path, contracts, base_case, fake_evidence) -> None:  # noqa: F811
+def test_persistent_disagreement_fails_closed(tmp_path, contracts, base_case, fake_evidence) -> None:  # noqa: F811,E501
     output, _, _, events = _run(
         tmp_path, contracts, base_case, fake_evidence,
         _script([{"primary_issue": "duplicate_charge"}, {"primary_issue": "duplicate_charge"}]),
     )
-    assert output["assessment"]["primary_issue"] == "duplicate_charge"
+    # an LLM issue the verifier rejects twice never drives the refund
+    assert output["assessment"]["primary_issue"] == "late_delivery_logistics"
+    assert output["assessment"]["confidence"] == 0.55
     verdicts = [e["decision_code"] for e in events if e["event_type"] == "verification_completed"]
-    assert verdicts[0] == "ISSUE_MISMATCH"
-    assert verdicts[-1] in ("PASS_LLM_OVER_RULES",) or verdicts[-1].startswith("FAIL_")
+    assert verdicts == ["ISSUE_MISMATCH", "PASS_RULES_OVER_LLM"]
+    escalations = [e for e in events if e.get("decision_code") == "ESCALATED_TO_VERIFIER"]
+    assert escalations[0]["attributes"] == {"llm_issue": "duplicate_charge"}
+
+
+def test_specialist_out_of_domain_issue_dropped() -> None:
+    from student_agent.llm_agents import _normalise
+
+    assert _normalise({"issue": "payment_mismatch"}, "shipment-agent")["issue"] is None
+    assert _normalise({"issue": "late_delivery_seller"}, "shipment-agent")["issue"] == (
+        "late_delivery_seller"
+    )
+    assert _normalise({"primary_issue": "payment_mismatch"}, "coordinator")["primary_issue"] == (
+        "payment_mismatch"
+    )
 
 def test_llm_revision_accepted(tmp_path, contracts, base_case, fake_evidence) -> None:  # noqa: F811
     output, _, _, _ = _run(
@@ -136,3 +148,94 @@ def test_llm_down_gives_insufficient(tmp_path, contracts, base_case, fake_eviden
     # no LLM decision -> never silently use the rules' answer
     assert output["assessment"]["primary_issue"] == "insufficient_evidence"
     assert "get_shipment_summary" in [n for n, _ in gateway.calls]
+
+
+def test_finding_contradicting_facts_is_dropped() -> None:
+    from student_agent.workflow import _GROUNDING
+
+    on_time = {"delivered_after_estimate": False, "confirmed_delivered_late_by_logistics": False}
+    assert not _GROUNDING["late_delivery_logistics"](on_time)
+    assert _GROUNDING["late_delivery_logistics"]({**on_time, "delivered_after_estimate": True})
+    assert not _GROUNDING["payment_mismatch"]({"reconciliation_mismatch_event": False})
+
+
+def test_gateway_retries_transient_tool_error(monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    from student_agent import mcp_gateway
+
+    envelope = {"evidence_ref": "ev_x", "data": {}}
+    replies = [
+        SimpleNamespace(is_error=True, content=[SimpleNamespace(text="Error executing tool")]),
+        SimpleNamespace(is_error=False, content=[], structured_content=envelope),
+    ]
+
+    class Session:
+        calls = 0
+
+        async def call_tool(self, name: str, arguments: dict[str, Any]) -> Any:
+            Session.calls += 1
+            return replies.pop(0)
+
+    async def no_sleep(_: float) -> None:
+        pass
+
+    monkeypatch.setattr(mcp_gateway.asyncio, "sleep", no_sleep)
+    no_schema = SimpleNamespace(validate_evidence=lambda *a: None)
+    gateway = mcp_gateway.EvidenceGateway(Session(), no_schema)  # type: ignore[arg-type]
+    assert asyncio.run(gateway.call("get_policy", case_id="C1", policy_version="v")) == envelope
+    assert Session.calls == 2
+
+
+def test_coordinator_cannot_invent_unreported_issue(tmp_path, contracts, base_case, fake_evidence) -> None:  # noqa: F811,E501
+    # no specialist reported duplicate_charge: the coordinator's pick is discarded, and on
+    # revision it may only take the verifier's issue or unsupported/insufficient
+    output, _, client, events = _run(
+        tmp_path, contracts, base_case, fake_evidence,
+        _script(
+            [{"primary_issue": "duplicate_charge"}, {"primary_issue": "late_delivery_logistics"}]
+        ),
+    )
+    assert output["assessment"]["primary_issue"] == "late_delivery_logistics"
+    decided = [e for e in events if e["event_type"] == "policy_decided"]
+    assert decided[0]["decision_code"] == "insufficient_evidence"
+    assert decided[0]["attributes"] == {"rejected_issue": "duplicate_charge"}
+    coordinator_bodies = [b for b in client.bodies if "coordinator" in b["messages"][0]["content"]]
+    first = json.loads(coordinator_bodies[0]["messages"][1]["content"])
+    assert first["allowed_issues"] == [
+        "insufficient_evidence", "late_delivery_logistics", "unsupported_claim",
+    ]
+
+
+def test_claim_refs_cite_only_deciding_domains(tmp_path, contracts, base_case, fake_evidence) -> None:  # noqa: F811,E501
+    output, _, _, _ = _run(
+        tmp_path, contracts, base_case, fake_evidence,
+        _script([{"primary_issue": "late_delivery_logistics", "confidence": 0.9}]),
+    )
+    claims = {c["claim_id"]: c["evidence_refs"] for c in output["claim_assessments"]}
+    assert claims["claim-001-a"] == [
+        "ev_order_decoy_012345678901234", "ev_ship_012345678901234567890",
+        "ev_pol_0123456789012345678901",
+    ]
+    assert claims["claim-001-b"] == [
+        "ev_pay_0123456789012345678901", "ev_pol_0123456789012345678901",
+    ]
+    assert "ev_product_0123456789012345678" not in output["evidence_refs"]
+
+
+def test_unsupported_claim_fetches_product_context(tmp_path, contracts, base_case, fake_evidence) -> None:  # noqa: F811,E501
+    base_case["customer_request"]["claims"][0]["topic"] = "unsupported_claim"
+    on_time = "2017-12-10T10:00:00-03:00"  # before the 12-20 estimate: nothing is late
+    fake_evidence["get_customer_history"]["data"]["orders"][0]["order_delivered_customer_date"] = (
+        on_time
+    )
+    fake_evidence["get_order"]["data"]["order_delivered_customer_date"] = on_time
+    fake_evidence["get_shipment_summary"]["data"]["events"] = []
+    output, gateway, _, _ = _run(
+        tmp_path, contracts, base_case, fake_evidence,
+        _script([{"primary_issue": "unsupported_claim", "confidence": 0.9}]),
+    )
+    assert output["assessment"]["primary_issue"] == "unsupported_claim"
+    assert [n for n, _ in gateway.calls].count("get_product_context") == 1
+    assert "ev_product_0123456789012345678" in output["evidence_refs"]
+

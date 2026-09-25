@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 from collections.abc import AsyncIterator
@@ -50,6 +51,12 @@ class EvidenceGateway:
                 result = await self._session.call_tool(tool_name, arguments=payload)
 
             is_error = getattr(result, "is_error", getattr(result, "isError", False))
+            if is_error:
+                # the gateway fails transiently (seen on the first calls of a run):
+                # one delayed retry, the tool calls are read-only so this is idempotent
+                await asyncio.sleep(1.5)
+                result = await self._session.call_tool(tool_name, arguments=payload)
+                is_error = getattr(result, "is_error", getattr(result, "isError", False))
             if is_error:
                 message = " ".join(
                     block.text for block in result.content if getattr(block, "text", None)

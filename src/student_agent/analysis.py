@@ -78,6 +78,32 @@ def _extract_order_rows(data: Any) -> list[dict[str, Any]]:
     return []
 
 
+# evidence domains that decide each claim topic (claim-level evidence_refs)
+_CLAIM_EVIDENCE: dict[str, tuple[str, ...]] = {
+    "late_delivery_seller": (
+        "get_order", "get_order_items", "get_shipment_summary", "get_policy",
+    ),
+    "late_delivery_logistics": ("get_order", "get_shipment_summary", "get_policy"),
+    "canceled_order_paid": (
+        "get_customer_history", "get_order", "get_payment_timeline", "get_policy",
+    ),
+    "unavailable_order_paid": (
+        "get_customer_history", "get_order", "get_order_items", "get_payment_timeline",
+        "get_policy",
+    ),
+    "duplicate_charge": ("get_order_items", "get_payment_timeline", "get_policy"),
+    "payment_mismatch": ("get_payment_timeline", "get_policy"),
+    "valid_split_payment": ("get_payment_timeline", "get_policy"),
+    "refund_pending": ("get_payment_timeline", "get_refund_timeline", "get_policy"),
+    "refund_failed": ("get_payment_timeline", "get_refund_timeline", "get_policy"),
+    "unsupported_claim": (
+        "get_order", "get_shipment_summary", "get_payment_timeline", "get_product_context",
+        "get_policy",
+    ),
+    "requested_full_refund": ("get_payment_timeline", "get_refund_timeline", "get_policy"),
+}
+
+
 def _incident(case: dict[str, Any], ev: dict[str, dict[str, Any] | None]) -> dict[str, Any]:
     """Entity resolution + incident window selection (decoy rows excluded)."""
     claimed_order_id = (case.get("customer_request") or {}).get("claimed_order_id")
@@ -229,6 +255,8 @@ def scoped_evidence(case: dict[str, Any], ev: dict[str, dict[str, Any] | None]) 
     """
     inc = _incident(case, ev)
     start, end = inc["window_start"], inc["window_end"]
+    facts: dict[str, Any] = {}
+    analyze_case(case, ev, facts_out=facts)
     items = _get_env_data(ev, "get_order_items")
     if isinstance(items, dict):
         items = items.get("items") or items.get("order_items") or []
@@ -236,6 +264,7 @@ def scoped_evidence(case: dict[str, Any], ev: dict[str, dict[str, Any] | None]) 
     ship = _get_env_data(ev, "get_shipment_summary")
     policy = _get_env_data(ev, "get_policy")
     return {
+        "facts": facts,
         "incident_order": inc["selected_row"],
         "incident_window": [str(start) if start else None, str(end) if end else None],
         "items": [
@@ -258,8 +287,13 @@ def analyze_case(
     case: dict[str, Any],
     ev: dict[str, dict[str, Any] | None],
     issue_override: str | None = None,
+    facts_out: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Pure rule-based analysis returning l3b-output-v2 compliant payload."""
+    """Pure rule-based analysis returning l3b-output-v2 compliant payload.
+
+    `facts_out`, when given, receives the computed signals (dates, totals, flags) the rules
+    classify on, so LLM agents reason over the same exact numbers.
+    """
     candidate_order_ids = case.get("candidate_order_ids") or []
     claims = (case.get("customer_request") or {}).get("claims") or []
     claim_topics = [c.get("topic") for c in claims if isinstance(c, dict)]
@@ -505,6 +539,38 @@ def analyze_case(
 
     # Issue classification
     order_status = str(selected_row.get("order_status", "")).lower()
+
+    if facts_out is not None:
+        carrier_dt = _parse_dt(carrier_date)
+        limits = [_parse_dt(it.get("shipping_limit_date")) for it in window_items] + [
+            _parse_dt(sl.get("shipping_limit_at")) for sl in window_ship_limits
+        ]
+        delivered_dt, estimated_dt = _parse_dt(customer_date), _parse_dt(estimated_date)
+        expected = sum(
+            _to_dec(it.get("price")) + _to_dec(it.get("freight_value")) for it in window_items
+        )
+        facts_out.update({
+            "order_status": order_status or None,
+            "carrier_handoff_at": carrier_date,
+            "delivered_at": customer_date,
+            "estimated_delivery_at": estimated_date,
+            "carrier_after_shipping_limit": bool(
+                carrier_dt and any(lim and _cmp_dt(carrier_dt, lim) > 0 for lim in limits)
+            ),
+            "delivered_after_estimate": bool(
+                delivered_dt and estimated_dt and _cmp_dt(delivered_dt, estimated_dt) > 0
+            ),
+            "confirmed_delivered_late_by_seller": has_confirmed_late_seller_event,
+            "confirmed_delivered_late_by_logistics": has_confirmed_late_logistics_event,
+            "captured_total_brl": captured_total,
+            "expected_order_total_brl": _to_money(expected),
+            "confirmed_capture_count": len(capture_events),
+            "payment_types": sorted(all_payment_types),
+            "repeated_payment_rows": len(seq_amount_pairs) - len(set(seq_amount_pairs)),
+            "reconciliation_mismatch_event": has_reconciliation_mismatch,
+            "latest_refund_statuses": sorted(latest_refund_statuses),
+            "refunded_total_brl": refunded_total,
+        })
     issue: str | None = None
 
     # 1. order_status canceled/unavailable + confirmed capture in window
@@ -776,11 +842,19 @@ def analyze_case(
         else:
             verdict = "unsupported"
             conf = 0.9
+        # a claim cites only the domains that decide it (evidence precision), never an
+        # empty list; top-level evidence_refs keeps the full required set
+        domain_refs = [
+            str(ev[t]["evidence_ref"]) for t in _CLAIM_EVIDENCE.get(str(topic), ())
+            if isinstance(ev.get(t), dict) and ev[t].get("evidence_ref")
+        ]
         claim_assessments.append({
             "claim_id": cid,
             "verdict": verdict,
             "confidence": conf,
-            "evidence_refs": evidence_refs,
+            "evidence_refs": (
+                domain_refs if domain_refs and issue != "insufficient_evidence" else evidence_refs
+            ),
         })
 
     # Shipment analysis

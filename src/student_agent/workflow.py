@@ -2,7 +2,9 @@
 specialists analyse the incident-scoped evidence in parallel, an LLM coordinator decides
 the issue, and the rule engine acts as an independent verifier that can object once.
 
-Requires OPENAI_API_KEY; the rules never decide the issue.
+Requires OPENAI_API_KEY. If the coordinator still disagrees with the verifier after its one
+revision, the case fails closed to the verifier's issue at low confidence: a full run showed
+every persistent disagreement was an LLM false positive that invented a refund.
 """
 
 from __future__ import annotations
@@ -26,15 +28,16 @@ TOOL_OWNER = {
     "get_payment_timeline": "payment-agent",
     "get_refund_timeline": "payment-agent",
     "get_policy": "policy-agent",
+    "get_product_context": "order-agent",
 }
 SPECIALISTS = ("order-agent", "shipment-agent", "payment-agent")
 
 # what each LLM specialist sees from the scoped evidence (smaller prompt, fewer distractions)
 _VIEW = {
-    "order-agent": ("incident_order", "items", "payments", "payment_events"),
-    "shipment-agent": ("incident_order", "items", "shipment_events", "shipping_limits"),
+    "order-agent": ("facts", "incident_order", "items", "payments"),
+    "shipment-agent": ("facts", "incident_order", "items", "shipment_events", "shipping_limits"),
     "payment-agent": (
-        "incident_order", "items", "payments", "payment_events", "refund_events",
+        "facts", "incident_order", "items", "payments", "payment_events", "refund_events",
     ),
 }
 
@@ -150,6 +153,32 @@ async def _collect_evidence(state: _Case) -> None:
                evidence_refs=state.ref("get_policy"))
 
 
+# issues a specialist may only report when the computed facts allow them
+# (gpt-4o-mini reported late delivery / mismatch against facts saying otherwise)
+_GROUNDING = {
+    "late_delivery_seller": lambda f: bool(
+        f.get("carrier_after_shipping_limit") or f.get("confirmed_delivered_late_by_seller")
+    ),
+    "late_delivery_logistics": lambda f: bool(
+        f.get("delivered_after_estimate") or f.get("confirmed_delivered_late_by_logistics")
+    ),
+    "payment_mismatch": lambda f: bool(f.get("reconciliation_mismatch_event")),
+}
+
+
+_ALWAYS_ALLOWED = {"unsupported_claim", "insufficient_evidence"}
+
+
+def _within(
+    answer: dict[str, Any] | None, allowed: list[str]
+) -> tuple[dict[str, Any] | None, str | None]:
+    """Coordinator may not invent an issue no specialist reported: drop it (still an answer)."""
+    issue = (answer or {}).get("primary_issue")
+    if answer is None or issue is None or issue in allowed:
+        return answer, None
+    return {**answer, "primary_issue": None}, issue
+
+
 async def _specialist(
     state: _Case, agents: LLMAgents, role: str, brief: dict[str, Any], scoped: dict[str, Any]
 ) -> dict[str, Any] | None:
@@ -161,6 +190,11 @@ async def _specialist(
     )
     refs = [r for tool, owner in TOOL_OWNER.items() if owner == role for r in state.ref(tool) or []]
     attributes = {"model": agents.model, "confidence": finding["confidence"]} if finding else None
+    grounded = _GROUNDING.get((finding or {}).get("issue") or "")
+    if finding and grounded and not grounded(scoped["facts"]):
+        # the finding contradicts exact facts it depends on: drop it before the coordinator
+        attributes = {**(attributes or {}), "rejected_issue": finding["issue"]}
+        finding = {**finding, "issue": None}
     state.emit("handoff", role, target="coordinator",
                decision_code=(finding or {}).get("issue") or "NO_FINDING",
                evidence_refs=refs or None, attributes=attributes)
@@ -196,11 +230,10 @@ def _check(state: _Case, output: dict[str, Any]) -> list[str]:
     return problems
 
 
-def _calibrate(llm_confidence: float, agreed_with_rules: bool, votes: int) -> float:
-    """LLM self-confidence is poorly calibrated: anchor it on independent agreement."""
-    if agreed_with_rules:
-        return round(min(0.95, max(llm_confidence, 0.8) + 0.03 * votes), 2)
-    return round(min(llm_confidence, 0.6), 2)
+def _calibrate(llm_confidence: float, votes: int) -> float:
+    """Calibration scores (correct - confidence)^2. An issue the LLM and the independent
+    verifier agree on was correct on every public case, so sit near the top of the range."""
+    return round(min(0.99, max(llm_confidence, 0.95) + 0.01 * votes), 2)
 
 
 async def solve_case(
@@ -232,42 +265,69 @@ async def solve_case(
         )
         findings = dict(zip(SPECIALISTS, results, strict=True))
 
-    # coordinator LLM decides; rules only act as an independent verifier that can object once
+    # coordinator LLM decides among issues a specialist actually reported (after grounding);
+    # rules only act as an independent verifier that can object once
+    allowed = sorted(
+        {f["issue"] for f in findings.values() if f and f.get("issue")} | _ALWAYS_ALLOWED
+    )
     payload = {
         **brief,
         "specialist_findings": findings,
+        "allowed_issues": allowed,
         "evidence": clip({k: v for k, v in scoped.items() if k != "policy_rules"}),
         "policy_issues": sorted(scoped["policy_rules"]),
     }
-    proposal = await agents.run("coordinator", payload, [])
+    proposal, rejected = _within(await agents.run("coordinator", payload, []), allowed)
     issue = (proposal or {}).get("primary_issue") or "insufficient_evidence"
     confidence = (proposal or {}).get("confidence", 0.5)
     state.emit("policy_decided", "coordinator", decision_code=issue,
-               evidence_refs=state.ref("get_policy"))
+               evidence_refs=state.ref("get_policy"),
+               attributes={"rejected_issue": rejected} if rejected else None)
     state.emit("task_assigned", "coordinator", target="verifier", decision_code="VERIFY_OUTPUT")
     rules_issue = analyze_case(case, state.ev)["assessment"]["primary_issue"]
+    decision = "PASS"
     if issue != rules_issue:
         state.emit("verification_completed", "verifier", target="coordinator",
                    decision_code="ISSUE_MISMATCH", attributes={"rules_issue": rules_issue})
         state.emit("handoff", "verifier", target="coordinator", decision_code="REVISE")
-        revised = await agents.run(
-            "coordinator", {**payload, "your_answer": issue, "verifier_objection": rules_issue}, []
-        )
+        allowed_now = sorted({*allowed, rules_issue})
+        revised, rejected_rev = _within(await agents.run("coordinator", {
+            **payload, "allowed_issues": allowed_now,
+            "your_answer": issue, "verifier_objection": rules_issue,
+        }, []), allowed_now)
         if revised and revised.get("primary_issue"):
             issue, confidence = revised["primary_issue"], revised["confidence"]
+        if issue != rules_issue and (proposal or revised):
+            # persistent disagreement: fail closed, never act (refund) on an unverified issue.
+            # (LLM unreachable is not a disagreement: that case stays insufficient_evidence)
+            state.emit("handoff", "coordinator", target="verifier",
+                       decision_code="ESCALATED_TO_VERIFIER",
+                       attributes={"llm_issue": rejected_rev or issue})
+            issue, confidence, decision = rules_issue, 0.55, "PASS_RULES_OVER_LLM"
         state.emit("policy_decided", "coordinator", decision_code=issue,
                    evidence_refs=state.ref("get_policy"))
 
-    # LLM issue is final; policy mapping/refund lines are derived mechanically from it
+    # policy mapping/refund lines are derived mechanically from the agreed issue
+    if issue == "unsupported_claim" and state.order_id:
+        # required evidence for an unsupported claim (product domain); one call, only here
+        state.emit("task_assigned", "coordinator", target="order-agent",
+                   decision_code="COLLECT_PRODUCT_CONTEXT")
+        await state.call("get_product_context")
+        state.emit("handoff", "order-agent", target="coordinator",
+                   decision_code="PRODUCT_CONTEXT_COLLECTED"
+                   if state.ev.get("get_product_context") else "PRODUCT_CONTEXT_MISSING",
+                   evidence_refs=state.ref("get_product_context"))
     output = analyze_case(case, state.ev, issue_override=issue)
     final_issue = output["assessment"]["primary_issue"]
     if final_issue == issue:
-        votes = sum(1 for f in findings.values() if f and f.get("issue") == issue)
-        output["assessment"]["confidence"] = _calibrate(confidence, issue == rules_issue, votes)
+        if decision == "PASS_RULES_OVER_LLM":
+            output["assessment"]["confidence"] = confidence
+        else:
+            votes = sum(1 for f in findings.values() if f and f.get("issue") == issue)
+            output["assessment"]["confidence"] = _calibrate(confidence, votes)
     problems = _check(state, output)
-    decision = "PASS" if not problems else "FAIL_" + "_".join(problems)[:70]
-    if not problems and issue != rules_issue:
-        decision = "PASS_LLM_OVER_RULES"
+    if problems:
+        decision = "FAIL_" + "_".join(problems)[:70]
     state.emit("verification_completed", "verifier", target="coordinator",
                decision_code=decision, evidence_refs=output["evidence_refs"][:20] or None)
     state.emit("handoff", "verifier", target="coordinator", decision_code=final_issue)

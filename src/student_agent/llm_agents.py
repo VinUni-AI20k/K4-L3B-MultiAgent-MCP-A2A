@@ -42,23 +42,51 @@ _TOOL_DESC = {
 _SCOPED = (
     " The evidence is already fetched and restricted to the incident window (decoy snapshots "
     "removed); missing_tools lists tools that failed. Confirmed lifecycle events override base "
-    "rows. The customer's claim is a hint, evidence decides."
+    "rows. `facts` are exact computations over that evidence: trust them over your own date or "
+    "amount arithmetic. The customer's claim is only a hint. Most cases have no problem in your "
+    "domain: answer issue null unless the evidence clearly shows one."
 )
-_FINDING = '"issue": one of ISSUES or null, "confidence": 0..1, "finding": "<=200 chars"'
+# each specialist may only report issues of its own domain; anything else is dropped
+DOMAIN_ISSUES = {
+    "order-agent": ["canceled_order_paid", "unavailable_order_paid"],
+    "shipment-agent": ["late_delivery_seller", "late_delivery_logistics"],
+    "payment-agent": [
+        "duplicate_charge", "payment_mismatch", "valid_split_payment",
+        "refund_pending", "refund_failed",
+    ],
+}
+
+
+def _finding(role: str) -> str:
+    return (
+        ' Reply JSON: {"issue": one of ' + json.dumps(DOMAIN_ISSUES[role])
+        + ' or null, "confidence": 0..1, "finding": "<=200 chars"}.'
+    )
+
+
 _ROLES = {
-    "order-agent": "You are the order agent. Inspect items, sellers and the incident order "
-    "status (canceled/unavailable while payment was captured)." + _SCOPED
-    + " Reply JSON: {" + _FINDING + "}.",
-    "shipment-agent": "You are the shipment agent. Decide if delivery was late and whether the "
-    "seller (carrier handoff after shipping_limit_date) or logistics (delivered after estimate) "
-    "caused it." + _SCOPED + " Reply JSON: {" + _FINDING + "}.",
-    "payment-agent": "You are the payment agent. Reconcile payment rows, captures and refunds: "
-    "duplicate capture, capture/payment mismatch, valid split payment, pending/failed refund "
-    "(latest status per refund wins)." + _SCOPED + " Reply JSON: {" + _FINDING + "}.",
-    "coordinator": "You are the coordinator. Combine specialist findings and the scoped evidence "
-    "into exactly one primary issue. If a verifier_objection is present, re-check it against "
-    "the evidence and either adopt it or keep yours. If no evidence supports a problem, answer "
-    "unsupported_claim; if required evidence is missing, answer insufficient_evidence. "
+    "order-agent": "You are the order agent. Report canceled_order_paid / unavailable_order_paid "
+    "only when the incident order status is canceled / unavailable AND a payment was captured "
+    "(facts.order_status, facts.captured_total_brl)." + _SCOPED + _finding("order-agent"),
+    "shipment-agent": "You are the shipment agent. late_delivery_seller: the seller handed the "
+    "parcel to the carrier after its shipping limit (facts.carrier_after_shipping_limit or a "
+    "confirmed delivered_late event with actor seller). late_delivery_logistics: delivered after "
+    "the estimate (facts.delivered_after_estimate or a confirmed delivered_late event with actor "
+    "logistics_provider). Otherwise null." + _SCOPED + _finding("shipment-agent"),
+    "payment-agent": "You are the payment agent. duplicate_charge: the same payment "
+    "(sequential, amount) captured twice. payment_mismatch: a reconciliation_mismatch event. "
+    "valid_split_payment: several captures of different payment types, each unique, no "
+    "mismatch — a legitimate split, not a problem to refund. refund_pending / refund_failed: "
+    "latest status of a refund." + _SCOPED + _finding("payment-agent"),
+    "coordinator": "You are the coordinator. Pick exactly one primary issue from the specialist "
+    "findings and the scoped evidence. primary_issue MUST be one of allowed_issues: the issues "
+    "specialists verified, plus unsupported_claim and insufficient_evidence; any other answer "
+    "is discarded. A specialist reporting null means its domain is fine. "
+    "Priority when several hold: canceled/unavailable paid order > refund_failed > "
+    "refund_pending > duplicate_charge > payment_mismatch > valid_split_payment > late delivery. "
+    "If nothing is supported answer unsupported_claim; if required evidence is missing answer "
+    "insufficient_evidence. If a verifier_objection is present, re-check both against `facts` "
+    "and answer the one the facts support. "
     'Reply JSON: {"primary_issue": one of ISSUES, "confidence": 0..1, "finding": "<=200 chars"}.',
 }
 
@@ -155,7 +183,7 @@ class LLMAgents:
                 message = await self._chat(messages, tools, final=step == max_steps)
                 calls = message.get("tool_calls") or []
                 if not calls or executor is None:
-                    return _normalise(json.loads(message.get("content") or "{}"))
+                    return _normalise(json.loads(message.get("content") or "{}"), role)
                 messages.append(
                     {"role": "assistant", "content": message.get("content"), "tool_calls": calls}
                 )
@@ -170,11 +198,11 @@ class LLMAgents:
             return None
         return None
 
-def _normalise(answer: Any) -> dict[str, Any] | None:
+def _normalise(answer: Any, role: str = "") -> dict[str, Any] | None:
     if not isinstance(answer, dict):
         return None
     for key in ("issue", "primary_issue"):
-        if key in answer and answer[key] not in ISSUES:
+        if key in answer and answer[key] not in DOMAIN_ISSUES.get(role, ISSUES):
             answer[key] = None
     try:
         answer["confidence"] = min(1.0, max(0.0, float(answer.get("confidence", 0.5))))

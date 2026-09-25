@@ -67,12 +67,17 @@ async def _run(root: Path) -> None:
         if not discovered_tools:
             raise RuntimeError("MCP Gateway returned no tools")
         only = {c for c in os.environ.get("DAY09_CASES", "").split(",") if c}
+        # keep raw evidence so prompts can be iterated offline (scripts/replay_llm.py)
+        # without spending audited MCP calls; debug/ is gitignored and never packaged
+        dump_dir = Path(os.environ.setdefault("DAY09_DUMP_DIR", str(root / "debug")))
         # cases are independent (evidence never shared), so run a bounded number at once
         limit = asyncio.Semaphore(max(1, int(os.environ.get("DAY09_CONCURRENCY", "4"))))
         pending = [
             case_id for case_id in case_set.case_ids
             if case_id not in done and not (only and case_id not in only)
         ]
+        for case_id in pending:  # dumps append, so drop stale ones of cases being re-run
+            (dump_dir / f"{case_id}.jsonl").unlink(missing_ok=True)
 
         async def solve_one(case_id: str) -> None:
             case = case_set.cases[case_id]
