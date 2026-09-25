@@ -10,9 +10,6 @@ from student_agent.workflow import (
     EntityResolution,
     InvestigationContext,
     PolicyAnalysis,
-    _check_timeline_complete,
-    _determine_shipment_verdict,
-    _extract_late_sellers,
     build_case_plan,
     build_final_output,
     financial_worker,
@@ -393,21 +390,3 @@ def test_seller_responsibility_uses_affected_seller() -> None:
     assert output["root_cause_analysis"]["responsible_parties"] == [
         {"party_type": "seller", "party_id": "SELLER_1"}
     ]
-
-
-def test_authoritative_shipment_timeline_ignores_stale_shipping_limit() -> None:
-    shipment = {
-        "order_status": "delivered",
-        "delivered_carrier_at": "2018-04-12T09:00:00-03:00",
-        "delivered_customer_at": "2018-04-19T09:00:00-03:00",
-        "estimated_delivery_at": "2018-04-20T09:00:00-03:00",
-        "shipping_limits": [
-            {"seller_id": "SELLER_1", "shipping_limit_at": "2018-04-13T09:00:00-03:00"},
-            {"seller_id": "SELLER_1", "shipping_limit_at": "2018-01-24T09:00:00-03:00"},
-        ],
-    }
-    assert _determine_shipment_verdict([], [shipment]) == "on_time"
-    assert _check_timeline_complete([], [shipment]) is True
-    late_shipment = {**shipment, "delivered_carrier_at": "2018-04-14T09:00:00-03:00"}
-    assert _determine_shipment_verdict([], [late_shipment]) == "seller_delay"
-    assert _extract_late_sellers([], [late_shipment]) == {"SELLER_1"}

@@ -848,38 +848,6 @@ def _determine_shipment_verdict(
     if not orders and not shipments:
         return "insufficient_evidence"
 
-    # The competition summary exposes its authoritative timeline at the top
-    # level. ``shipping_limits`` may contain historical/noisy rows, so use the
-    # latest seller deadline rather than treating every row as an independent
-    # shipment or conflict.
-    authoritative_verdicts: list[str] = []
-    for shipment in shipments:
-        carrier_at = _parse_date(shipment.get("delivered_carrier_at"))
-        customer_at = _parse_date(shipment.get("delivered_customer_at"))
-        estimated_at = _parse_date(shipment.get("estimated_delivery_at"))
-        raw_limits = shipment.get("shipping_limits")
-        limits = (
-            [
-                parsed
-                for row in raw_limits
-                if isinstance(row, dict)
-                and (parsed := _parse_date(row.get("shipping_limit_at"))) is not None
-            ]
-            if isinstance(raw_limits, list)
-            else []
-        )
-        seller_deadline = max(limits) if limits else None
-        if carrier_at and seller_deadline and carrier_at > seller_deadline:
-            authoritative_verdicts.append("seller_delay")
-        elif customer_at and estimated_at and customer_at > estimated_at:
-            authoritative_verdicts.append("logistics_delay")
-        elif customer_at and estimated_at:
-            authoritative_verdicts.append("on_time")
-
-    if authoritative_verdicts:
-        unique = set(authoritative_verdicts)
-        return authoritative_verdicts[0] if len(unique) == 1 else "conflicting"
-
     # Check for returned status
     for shipment in shipments:
         status = str(shipment.get("status", "")).casefold()
@@ -962,27 +930,6 @@ def _extract_late_sellers(
     late_sellers: set[str] = set()
 
     for shipment in shipments:
-        carrier_at = _parse_date(shipment.get("delivered_carrier_at"))
-        raw_limits = shipment.get("shipping_limits")
-        limit_rows = (
-            [
-                (row, parsed)
-                for row in raw_limits
-                if isinstance(row, dict)
-                and (parsed := _parse_date(row.get("shipping_limit_at"))) is not None
-            ]
-            if isinstance(raw_limits, list)
-            else []
-        )
-        if carrier_at and limit_rows:
-            latest_limit = max(value for _, value in limit_rows)
-            if carrier_at > latest_limit:
-                for row, _ in limit_rows:
-                    seller_id = _clean_id(row.get("seller_id"))
-                    if seller_id and not seller_id.startswith("candidate"):
-                        late_sellers.add(seller_id)
-                continue
-
         promised = _parse_date(
             shipment.get("shipping_limit_date")
             or shipment.get("promise_date")
@@ -1022,20 +969,14 @@ def _check_timeline_complete(orders: list[dict[str, Any]], shipments: list[dict[
     total_items = max(len(shipments), len(orders))
 
     for shipment in shipments:
-        has_status = bool(
-            shipment.get("order_status")
-            or shipment.get("status")
-            or shipment.get("shipping_status")
-        )
+        has_status = bool(shipment.get("status") or shipment.get("shipping_status"))
         has_delivery = bool(
-            shipment.get("delivered_customer_at")
-            or shipment.get("delivery_date")
+            shipment.get("delivery_date")
             or shipment.get("actual_delivery_date")
             or shipment.get("delivered_date")
         )
         has_promise = bool(
-            shipment.get("estimated_delivery_at")
-            or shipment.get("shipping_limit_date")
+            shipment.get("shipping_limit_date")
             or shipment.get("promise_date")
             or shipment.get("estimated_delivery_date")
         )
