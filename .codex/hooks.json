@@ -1,0 +1,18 @@
+{
+  "description": "Jev skill routing for K4-L3B",
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "name": "jev-skill-selector",
+            "type": "command",
+            "command": "bun run /home/dat/dev/jev_skill_selector/hooks/codex.ts",
+            "timeout": 30,
+            "additionalContextLimit": 50000
+          }
+        ]
+      }
+    ]
+  }
+}
