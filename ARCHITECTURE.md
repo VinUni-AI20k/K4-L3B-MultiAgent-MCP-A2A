@@ -1,91 +1,132 @@
 # L3B Architecture Record
 
-Team phải cập nhật tài liệu này cùng source. Mục tiêu là mô tả quyết định có thể kiểm chứng, không ghi prompt bí mật hoặc chain-of-thought.
+## 1. Tổng quan hệ thống
 
-## 1. System overview
-
-Vẽ hoặc mô tả luồng từ input/candidate resolution đến MCP investigation, specialist agents, conflict resolver, verifier, output và trace.
+Hệ thống xử lý một khiếu nại thương mại điện tử theo mô hình A2A có điều phối
+trung tâm. `Coordinator` chỉ giao việc và kiểm soát vòng đời; các specialist
+agent chỉ thu thập hoặc diễn giải evidence thuộc miền được phân quyền. Mọi MCP
+call luôn mang `case_id` của case hiện tại.
 
 ```text
-Input → Entity Resolver → Coordinator → Specialists → Conflict Resolver → Verifier → Output
-            │                              │                  │             │
-            └──────────────────────────── MCP ────────────────┴──────────── Trace
+Input case
+    |
+    v
+Coordinator / Router
+    |
+    +--> Order/Item Agent -----------+
+    |                                 |
+    +--> Shipment Agent -------------+--> Policy Agent --> Verifier --> Output
+    |                                 |                         |
+    +--> Payment Agent --------------+                         +--> Trace
+              (MCP evidence collector)
 ```
 
-## 2. Agent ownership
+Điểm vào là `solve_case(case, gateway, trace)`. Hàm trả về đúng một JSON theo
+`l3b-output-v2.schema.json`; không thêm field ngoài public contract.
 
-Phase 2 implementation uses a bounded handoff:
-`coordinator -> order-item-agent -> shipment/payment/policy workers -> verifier`.
-Workers return state patches; evidence and errors are append-only fields, so a
-later worker cannot discard earlier audit data. Each consumed MCP response is
-linked through its server-issued `evidence_ref` in output and trace.
+## 2. Shared state và nguyên tắc bất biến
 
-| Actor | Input | Trách nhiệm | Tool permission | Output/handoff |
+`ComplaintState` là bộ nhớ dùng chung trong `src/student_agent/state.py`.
+Worker không được sửa evidence đã có. Hai collection sau dùng reducer
+`operator.add` để chỉ được bổ sung:
+
+| Field | Ý nghĩa |
+| --- | --- |
+| `evidence` | MCP evidence envelope nguyên vẹn, gồm `evidence_ref` do server cấp |
+| `errors` | Lỗi observable của worker, không chứa prompt hoặc chain-of-thought |
+
+State còn giữ `case_id`, danh sách tool đã discovery, `current_worker`, số vòng
+`iteration_count`, order đã resolve/reject và dữ liệu phân tích theo miền. Mỗi
+case có state riêng, do đó evidence không bị dùng chéo case.
+
+## 3. Ownership, handoff và quyền tool
+
+| Agent | Trách nhiệm | Input | Tool được phép | Handoff |
 | --- | --- | --- | --- | --- |
-| Order/item | Case IDs/candidates | Resolve order and item scope | Discovered order tools | IDs and confidence |
-| Coordinator | Shared state | Bounded assignment/handoff | None | Worker target |
-| Shipment | Resolved order | Collect shipment facts | Discovered shipment tools | Evidence |
-| Payment/refund | Resolved order | Collect payment facts | Discovered payment tools | Evidence |
-| Policy | Resolved order | Collect policy facts | Discovered policy tools | Evidence |
-| Verifier | State/evidence refs | Build safe final output | None | Schema-valid output |
+| Coordinator / Router | Khởi tạo state, giới hạn vòng lặp, phân việc | `case` | Không gọi evidence tool | Order/Item hoặc Verifier |
+| Order/Item Agent | Resolve order và item scope | `order_id`, candidates | Chỉ tool order đã được MCP công bố | Shipment, Payment, Policy |
+| Shipment Agent | Thu thập vận đơn/timeline | Resolved order | Chỉ tool shipment đã được MCP công bố | Policy / Verifier |
+| Payment Agent | Thu thập capture, refund, payment reference | Resolved order | Chỉ tool payment/refund đã được MCP công bố | Policy / Verifier |
+| Policy Agent | Thu thập quy chế liên quan | Resolved order + evidence hiện có | Chỉ tool policy đã được MCP công bố | Verifier |
+| Verifier Agent | Kiểm tra invariant và tạo output | Shared state | Không gọi MCP | END OUTPUT |
 
-Áp dụng least privilege; tool discovery không đồng nghĩa mọi actor đều được gọi mọi tool.
+Tool discovery không đồng nghĩa với toàn quyền. Workflow chọn tool từ danh sách
+MCP đã công bố; không probe hay gọi tên tool không tồn tại. Một tool được chọn
+chỉ gọi tối đa một lần cho một case, trừ retry có kiểm soát.
 
-## 3. Entity resolution và A2A protocol
+## 4. A2A protocol
 
-Mô tả cách xếp hạng/reject candidate, confidence threshold, message envelope, correlation theo `case_id`, điều kiện handoff, timeout và cách tránh vòng lặp. Không trace nội dung suy luận riêng.
+Mỗi message/handoff được tương quan bằng `case_id`. Trace chỉ ghi sự kiện quan
+sát được, theo thứ tự sau:
 
-## 4. Evidence và conflict lifecycle
+```text
+case_received
+  -> task_assigned (Coordinator -> Order/Item)
+  -> tool_result_consumed (nếu MCP trả evidence)
+  -> handoff (Order/Item -> specialist team)
+  -> task_assigned / tool_result_consumed cho từng specialist
+  -> verification_completed
+  -> case_finalized
+```
 
-Mô tả cách validate MCP response, lưu `evidence_ref`, chọn source theo policy, biểu diễn unresolved conflict, map evidence vào claim/output và emit `tool_result_consumed`. Evidence không được tái sử dụng giữa các case.
+Order/Item Agent ưu tiên `order_id` có sẵn trong input. Nếu chỉ có candidates,
+agent lấy candidate phù hợp từ MCP, lưu candidate khác vào
+`rejected_candidates`. Evidence MCP xác nhận order cho confidence 0.90; ID chỉ
+có từ input được coi là chưa xác thực với confidence 0.50. Không resolve được
+order thì không gọi specialist và handoff thẳng sang Verifier.
 
-## 5. Failure and efficiency policy
+## 5. Evidence lifecycle và conflict policy
 
-| Failure | Retry budget | Fallback | Trace event/code |
+1. `EvidenceGateway` gọi MCP với đúng `case_id`.
+2. Response được validate bằng `mcp-evidence-response-v1.schema.json`.
+3. Worker lưu nguyên evidence envelope và lấy đúng `evidence_ref` server cấp.
+4. Trace phát `tool_result_consumed` với tool name và `evidence_refs` tương ứng.
+5. Verifier chỉ đưa các evidence ref đã thu thập của case vào output.
+
+Không tự tạo, chỉnh sửa hoặc tái sử dụng `evidence_ref`. Nếu evidence giữa các
+nguồn mâu thuẫn hoặc thiếu miền bắt buộc, agent không suy diễn dữ liệu còn thiếu:
+Verifier giữ verdict `insufficient_evidence`, status `needs_investigation`, hoàn
+tiền đề xuất bằng 0 và đưa case vào manual review.
+
+## 6. Failure, retry và efficiency
+
+| Sự cố | Retry budget | Xử lý fallback | Kết quả |
 | --- | ---: | --- | --- |
-| MCP timeout | TODO | TODO | TODO |
-| Entity not found/ambiguous | TODO | TODO | TODO |
-| Source conflict | TODO | TODO | TODO |
-| Invalid specialist result | TODO | TODO | TODO |
+| Timeout/lỗi mạng MCP | 1 retry, tối đa 2 call | Ghi lỗi; dừng mở rộng specialist | Manual investigation |
+| Tool không được discovery | 0 | Không gọi tool | Insufficient evidence |
+| Không resolve được order | 0 | Bỏ qua specialist | Manual investigation |
+| MCP response invalid | 1 retry, tối đa 2 call | Ghi lỗi; dừng worker | Manual investigation |
+| Vượt `MAX_ITERATIONS = 5` | 0 | Handoff sang Verifier | Safe fallback output |
 
-Nêu query budget/cache strategy để tránh gọi lặp và quét rộng. Retry phải có giới hạn, idempotent và không biến missing evidence thành dữ liệu phỏng đoán.
+Chỉ retry evidence read có tính idempotent. Không retry vô hạn, không quét rộng
+tool, và không gọi lại evidence đã có. Các giới hạn này vừa ngăn loop vừa bảo vệ
+điểm efficiency của cuộc thi.
 
-## 6. Verification invariants
+## 7. Verification invariants
 
-The workflow caps handoff iterations at five. A failed MCP call is recorded and
-stops specialist expansion; the verifier returns `needs_investigation` with
-`insufficient_evidence`, no invented refund, and only real MCP evidence refs.
-Every selected tool must first appear in MCP discovery and is called once at most
-per case.
+Trước khi finalize, Verifier phải bảo đảm:
 
-Liệt kê kiểm tra trước finalize: schema, entity scope, rejected candidates, evidence ownership, claim linkage, timeline, payment/refund totals, source precedence, responsibility/action consistency và confidence bounds.
+- `case_id` output đúng input case;
+- không có field ngoài `l3b-output-v2.schema.json`;
+- mọi `evidence_refs` có mặt trong evidence state của chính case;
+- financial totals không âm và refund không được bịa khi thiếu payment evidence;
+- `resolved_order_ids`, affected entities và entity-resolution nhất quán;
+- confidence nằm trong đoạn `[0, 1]`;
+- case thiếu evidence đi theo `needs_investigation`, không khẳng định trách nhiệm
+  hoặc hoàn tiền.
 
-## 6a. Concrete A2A protocol and evidence lifecycle
+## 8. Reproducibility và vận hành
 
-The coordinator carries the original `case_id` in every handoff and MCP call.
-The order/item agent prefers an explicit `order_id`; otherwise it uses the first
-candidate supplied by the case and records remaining candidates as rejected. A
-confirmed MCP order response gives 0.90 entity confidence; an unverified
-supplied ID is only 0.50. No resolved order skips specialists and goes directly
-to verification.
+Yêu cầu Python 3.11+ cùng dependency pin trong `pyproject.toml`. Chạy kiểm tra
+local bằng:
 
-The observable protocol is `task_assigned`, `handoff`,
-`tool_result_consumed`, then `verification_completed`. Private reasoning and
-raw prompts are never written to trace. The counter increases at each worker
-and is capped at five to prevent routing loops.
+```powershell
+.\.venv\Scripts\python.exe -m ruff check src tests
+.\.venv\Scripts\python.exe -m pytest -q
+.\.venv\Scripts\python.exe -m student_agent.cli mcp-tools
+.\.venv\Scripts\python.exe -m student_agent.cli run
+.\.venv\Scripts\python.exe -m student_agent.cli validate
+```
 
-`EvidenceGateway` validates each MCP envelope against
-`mcp-evidence-response-v1.schema.json`. The workflow preserves exactly the
-server-issued `evidence_ref`, emits it in `tool_result_consumed`, and includes
-only collected refs in the final output. Evidence is state-local and never
-reused across cases. When a required domain is missing or sources conflict, the
-verifier returns `insufficient_evidence`, recommends no refund, and routes the
-case for manual review.
-
-Retry is limited to one retry (two total calls) for an idempotent MCP evidence
-read. A second failure records the worker error and stops specialist expansion;
-the verifier still returns a schema-valid fallback output.
-
-## 7. Reproducibility
-
-Ghi model/config, dependency pinning, concurrency limit, random seed (nếu có), lệnh chạy và giới hạn tài nguyên. Không ghi API key.
+`.env`, Team API key, prompt nội bộ và chain-of-thought không được ghi vào trace,
+output hoặc submission package.
