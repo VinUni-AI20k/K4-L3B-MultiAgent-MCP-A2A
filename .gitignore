@@ -28,6 +28,10 @@ dist/*
 !dist/.gitkeep
 *.zip
 *.log
+.run-backups/
+.day09-stage-*/
+.day09-work/
+.understand-anything/
 
 # Editors and operating systems
 .idea/

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -23,8 +24,13 @@ class EvidenceGateway:
 
     async def call(self, tool_name: str, *, case_id: str, **arguments: str) -> dict[str, Any]:
         payload = {"case_id": case_id, **arguments}
-        result = await self._session.call_tool(tool_name, arguments=payload)
-        if result.isError:
+        result = await asyncio.wait_for(
+            self._session.call_tool(tool_name, arguments=payload), timeout=90.0
+        )
+        # MCP Python renamed this attribute from ``isError`` to ``is_error``.
+        # Supporting both keeps the starter compatible with the competition's
+        # currently installed client and older local environments.
+        if getattr(result, "is_error", getattr(result, "isError", False)):
             message = " ".join(
                 block.text for block in result.content if getattr(block, "text", None)
             )
@@ -46,7 +52,7 @@ async def connect_gateway(
     endpoint: str, team_api_key: str, contracts: Contracts
 ) -> AsyncIterator[EvidenceGateway]:
     headers = {"Authorization": f"Bearer {team_api_key}"}
-    timeout = httpx2.Timeout(300.0, connect=30.0, write=30.0, pool=30.0)
+    timeout = httpx2.Timeout(None, connect=30.0, write=30.0, pool=30.0)
     async with (
         httpx2.AsyncClient(headers=headers, timeout=timeout) as http_client,
         streamable_http_client(endpoint, http_client=http_client) as (read_stream, write_stream),
