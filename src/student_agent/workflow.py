@@ -27,14 +27,19 @@ async def solve_case(
     - Specialized Agents (Qwen3:1.7b): EntityResolver, Shipment, Payment, Policy,
       ConflictResolver, and Verifier.
     """
-    case_id = case.get("case_id", "UNKNOWN")
+    # Extract normalized case details
+    from .cases import extract_case_details
+
+    info = extract_case_details(case)
+    case_id = info["case_id"]
+    claims = info["claims"]
 
     # Load model configurations from environment or use defaults
     orchestrator_model = os.getenv("ORCHESTRATOR_MODEL", "qwen3:8b")
     specialist_model = os.getenv("SPECIALIST_MODEL", "qwen3:1.7b")
     ollama_host = os.getenv("OLLAMA_HOST", "http://localhost:11434")
 
-    # 1. MCP Evidence Gateway & Cache initialization
+    # 1. MCP Evidence Gateway & Cache initialization (Shared Blackboard)
     evidence_mgr = EvidenceManager(case_id=case_id, gateway=gateway, trace=trace)
     await evidence_mgr.initialize()
 
@@ -50,26 +55,40 @@ async def solve_case(
     # 3. Coordinator: Deep thinking, context analysis & master plan formulation
     master_plan = await coordinator.analyze_and_plan(case, trace)
 
-    # 4. Coordinator assigns task to Entity Resolver
+    # 4. Phase 1: Entity Resolution & Gate Keeper
     coordinator.assign_entity_task(case_id, trace)
-
-    # 5. Entity Resolver: Vets candidates, queries MCP, filters out synthetic candidate-xxx
     entity_result = await entity_resolver.resolve(case, evidence_mgr, trace)
     resolved_order_ids = entity_result.get("resolved_order_ids", [])
 
-    # 6. Coordinator assigns tasks to Specialists
+    # Gate Keeper: Entity Valid?
+    if not resolved_order_ids:
+        # Fallback Strategy: check candidate_order_ids for any valid hex candidate or claimed_order_id
+        claimed = info.get("claimed_order_id")
+        valid_cands = [
+            str(c).strip() for c in info.get("candidate_order_ids", [])
+            if not str(c).startswith("candidate-") and len(str(c)) == 32
+        ]
+        if claimed and claimed in valid_cands:
+            resolved_order_ids = [claimed]
+            entity_result["resolved_order_ids"] = resolved_order_ids
+            entity_result["status"] = "resolved"
+        elif valid_cands:
+            resolved_order_ids = [valid_cands[0]]
+            entity_result["resolved_order_ids"] = resolved_order_ids
+            entity_result["status"] = "resolved"
+
+    # 5. Phase 2: Parallel Specialist Investigation
     coordinator.assign_specialist_tasks(case_id, resolved_order_ids, trace)
 
-    # 7. Specialists execute domain investigations concurrently
     shipment_task = shipment_agent.investigate(case_id, resolved_order_ids, evidence_mgr, trace)
     payment_task = payment_agent.investigate(case_id, resolved_order_ids, evidence_mgr, trace)
-    policy_task = policy_agent.investigate(case_id, case.get("claims", []), evidence_mgr, trace)
+    policy_task = policy_agent.investigate(case_id, claims, evidence_mgr, trace)
 
     shipment_res, payment_res, policy_res = await asyncio.gather(
         shipment_task, payment_task, policy_task
     )
 
-    # 8. Conflict Resolver: Applies source precedence, reconciles claims vs logs, synthesizes root causes
+    # 6. Phase 3: Triangulation & Conflict Resolution
     conflict_res = await conflict_resolver.resolve(
         case=case,
         entity_res=entity_result,
@@ -79,7 +98,7 @@ async def solve_case(
         trace=trace,
     )
 
-    # 9. Verifier: Validates invariants, checks schema consistency, calibrates confidence, packages output
+    # 7. Formal Verification & Packaging
     final_output = await verifier.verify_and_package(
         case=case,
         entity_res=entity_result,

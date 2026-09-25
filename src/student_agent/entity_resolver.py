@@ -53,10 +53,13 @@ class EntityResolverAgent:
         evidence_mgr: EvidenceManager,
         trace: TraceWriter,
     ) -> dict[str, Any]:
-        case_id = case.get("case_id", "")
-        candidate_order_ids = case.get("candidate_order_ids", [])
-        hints = case.get("hints", {})
-        customer_unique_id = case.get("customer_unique_id") or hints.get("customer_unique_id")
+        from .cases import extract_case_details
+
+        info = extract_case_details(case)
+        case_id = info["case_id"]
+        candidate_order_ids = info["candidate_order_ids"]
+        customer_unique_id = info["customer_unique_id"]
+        claimed_order_id = info["claimed_order_id"]
 
         # 1. Immediately identify synthetic garbage IDs (candidate-xxx)
         rejected_candidates: list[str] = []
@@ -84,7 +87,7 @@ class EntityResolverAgent:
 
         # Also lookup candidates directly if needed
         order_tool = evidence_mgr.find_matching_tool(
-            "get_order_details", "get_order", "lookup_order"
+            "get_order", "get_order_details", "lookup_order"
         )
         known_order_ids: list[str] = []
         if customer_data and isinstance(customer_data, dict):

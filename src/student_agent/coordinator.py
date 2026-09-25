@@ -69,11 +69,14 @@ class CoordinatorAgent:
         trace: TraceWriter,
     ) -> dict[str, Any]:
         """Analyze case input, produce reasoning (<think>), and generate the master plan."""
-        case_id = case.get("case_id", "UNKNOWN")
-        claims = case.get("claims", [])
-        candidates = case.get("candidate_order_ids", [])
-        hints = case.get("hints", {})
-        customer_id = case.get("customer_unique_id") or hints.get("customer_unique_id")
+        from .cases import extract_case_details
+
+        info = extract_case_details(case)
+        case_id = info["case_id"]
+        claims = info["claims"]
+        candidates = info["candidate_order_ids"]
+        customer_id = info["customer_unique_id"]
+        hints = {"customer_unique_id": customer_id}
 
         prompt = (
             f"Case ID: {case_id}\n"

@@ -2,30 +2,53 @@
 
 ## 1. System overview
 
-Luồng điều phối Multi-Agent từ case input đến final output và trace:
+Hệ thống được thiết kế theo kiến trúc **SOP-driven Dynamic Hierarchical DAG with Shared Evidence Blackboard & Reversible Verification**:
 
-```text
-Input Case (JSON)
-       │
-       ▼
-Coordinator Agent (Qwen3:8b Thinking & Planning)
-       │
-       ├──[task_assigned]──► Entity Resolver Agent (Qwen3:1.7b) ◄──► MCP Gateway
-       │                                │
-       │◄──[handoff (resolved_order_ids)]┘
-       │
-       ├──[task_assigned]──► Shipment Agent (Qwen3:1.7b)       ◄──► MCP Gateway
-       ├──[task_assigned]──► Payment Agent (Qwen3:1.7b)        ◄──► MCP Gateway
-       └──[task_assigned]──► Policy Agent (Qwen3:1.7b)         ◄──► MCP Gateway
-                                        │
-                                        ▼ (handoff facts)
-                          Conflict Resolver Agent (Qwen3:1.7b)
-                                        │
-                                        ▼ (handoff facts & conflicts)
-                          Verifier Agent (Qwen3:1.7b + Invariants)
-                                        │
-                                        ▼ [verification_completed]
-                          Output File (outputs/CASE_xxx.json)
+```mermaid
+flowchart TD
+    subgraph SharedInfra["TẦNG BẢNG ĐEN CHIA SẺ & BẰNG CHỨNG (SHARED BLACKBOARD)"]
+        Blackboard[("Case Evidence Blackboard<br/>- Cache MCP Tool Calls<br/>- Evidence Refs Index<br/>- In-memory Knowledge Graph")]
+        AuditTrace["Observable Trace Engine<br/>(case_received, task_assigned, handoff, tool_consumed, verification)"]
+    end
+
+    subgraph Phase1["GIAI ĐOẠN 1: RESOLUTION & GATING"]
+        In[Input Case JSON] --> Coord["Coordinator Agent"]
+        Coord -->|"Task 1: Resolve"| ER["Entity Resolution Agent"]
+        ER <-->|"Call & Cache"| Blackboard
+        ER -->|"Handoff / Resolved ID"| Gate{"Gate Keeper:<br/>Entity Valid?"}
+        Gate -- "Ambiguous / Not Found" --> Fallback["Heuristic / Fallback Strategy"]
+        Fallback --> Verif
+    end
+
+    subgraph Phase2["GIAI ĐOẠN 2: PARALLEL SPECIALIST INVESTIGATION"]
+        Gate -- "Resolved" --> Dispatcher["Coordinator Task Dispatcher"]
+        Dispatcher -->|"Task 2a: Logistics"| ShipAgent["Shipment Specialist"]
+        Dispatcher -->|"Task 2b: Financials"| PayAgent["Payment Specialist"]
+        Dispatcher -->|"Task 2c: Terms"| PolicyAgent["Policy Specialist"]
+        
+        ShipAgent <-->|"Lookup / Call"| Blackboard
+        PayAgent <-->|"Lookup / Call"| Blackboard
+        PolicyAgent <-->|"Lookup / Call"| Blackboard
+    end
+
+    subgraph Phase3["GIAI ĐOẠN 3: TRIANGULATION & VERIFICATION"]
+        ShipAgent --> Aggregator["Cross-Specialist Evidence Aggregator"]
+        PayAgent --> Aggregator
+        PolicyAgent --> Aggregator
+        
+        Aggregator --> ConfResolver["Conflict Resolver<br/>(Apply Source Precedence Matrix)"]
+        ConfResolver --> Verif["Formal Verifier Agent<br/>- Cross-field Consistency Checks<br/>- Schema Validator<br/>- Confidence Calibrator"]
+    end
+
+    Verif -->|"Invariant Passed"| Out[Outputs JSON]
+    Verif -.->|"Invariant Failed (Self-Correction)"| Dispatcher
+
+    %% Kết nối Trace
+    Coord -.-> AuditTrace
+    ER -.-> AuditTrace
+    ShipAgent -.-> AuditTrace
+    PayAgent -.-> AuditTrace
+    Verif -.-> AuditTrace
 ```
 
 Mọi hoạt động tương tác với MCP Gateway và vòng đời chuyển giao task giữa các Agent đều phát sinh sự kiện quan sát được ghi nhận vào `traces/trace.jsonl`.
