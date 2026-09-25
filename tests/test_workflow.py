@@ -10,8 +10,12 @@ from student_agent.workflow import (
     EntityResolution,
     InvestigationContext,
     PolicyAnalysis,
+    _check_timeline_complete,
+    _determine_shipment_verdict,
+    _extract_late_sellers,
     build_case_plan,
     build_final_output,
+    financial_worker,
     merge_worker_results,
     resolve_entity,
 )
@@ -297,3 +301,113 @@ def test_output_uses_primary_claim_and_policy_rule() -> None:
     assert output["shipment_analysis"]["verdict"] == "logistics_delay"
     assert output["financial_resolution"]["recommended_refund_brl"] == 16.0
     assert output["claim_assessments"][1]["verdict"] == "partially_supported"
+
+
+@pytest.mark.parametrize(
+    ("claim_topic", "expected_verdict"),
+    [
+        ("unavailable_order_paid", "reconciled"),
+        ("duplicate_charge", "duplicate_capture"),
+    ],
+)
+def test_equal_payment_values_only_mean_duplicate_for_duplicate_claim(
+    claim_topic: str, expected_verdict: str
+) -> None:
+    plan = build_case_plan(
+        {
+            "case_id": "CASE_PAYMENT",
+            "customer_request": {
+                "message": "Kiểm tra payment",
+                "claims": [{"claim_id": "claim-a", "topic": claim_topic}],
+            },
+        }
+    )
+
+    class PaymentGateway:
+        async def call(self, tool_name: str, *, case_id: str, **arguments: str):
+            assert tool_name == "get_order_payments"
+            return {
+                "evidence_ref": "ev_" + "p" * 24,
+                "data": {
+                    "payments": [
+                        {"payment_value": "89.00", "status": "captured"},
+                        {"payment_value": "89.00", "status": "captured"},
+                    ]
+                },
+            }
+
+    context = InvestigationContext(plan.case_id, PaymentGateway(), FakeTrace())
+    result = asyncio.run(
+        financial_worker(
+            ("ORDER_1",),
+            plan,
+            context,
+        )
+    )
+    assert result["payment_analysis"]["verdict"] == expected_verdict
+
+
+def test_seller_responsibility_uses_affected_seller() -> None:
+    plan = build_case_plan(
+        {
+            "case_id": "CASE_SELLER",
+            "customer_request": {
+                "claims": [{"claim_id": "claim-a", "topic": "late_delivery_seller"}]
+            },
+        }
+    )
+    context = InvestigationContext(plan.case_id, FakeGateway({}), FakeTrace())
+    context.evidence_refs.append("ev_" + "e" * 24)
+    context._cache[("get_order_items", (("order_id", "ORDER_1"),))] = {
+        "data": {"items": [{"order_item_id": "ITEM_1", "seller_id": "SELLER_1"}]}
+    }
+    policy = PolicyAnalysis(
+        "eligible",
+        None,
+        (),
+        (),
+        (),
+        {
+            "case_status": "action_required",
+            "responsible_parties": [{"party_type": "seller", "party_id": "STALE_SELLER"}],
+        },
+    )
+    output = build_final_output(
+        plan,
+        context,
+        EntityResolution("resolved", ("ORDER_1",), (), 0.95, ()),
+        {"verdict": "seller_delay", "late_seller_ids": [], "timeline_complete": True},
+        {
+            "payment_analysis": {
+                "verdict": "reconciled",
+                "captured_total_brl": 0.0,
+                "refunded_total_brl": 0.0,
+                "refundable_total_brl": 0.0,
+            },
+            "financial_resolution": {},
+        },
+        policy,
+        ConflictResolution([], [], []),
+    )
+    assert output["affected_entities"]["seller_ids"] == ["SELLER_1"]
+    assert output["root_cause_analysis"]["responsible_parties"] == [
+        {"party_type": "seller", "party_id": "SELLER_1"}
+    ]
+
+
+def test_authoritative_shipment_timeline_ignores_stale_shipping_limit() -> None:
+    shipment = {
+        "order_status": "delivered",
+        "delivered_carrier_at": "2018-04-12T09:00:00-03:00",
+        "delivered_customer_at": "2018-04-19T09:00:00-03:00",
+        "estimated_delivery_at": "2018-04-20T09:00:00-03:00",
+        "shipping_limits": [
+            {"seller_id": "SELLER_1", "shipping_limit_at": "2018-04-13T09:00:00-03:00"},
+            {"seller_id": "SELLER_1", "shipping_limit_at": "2018-01-24T09:00:00-03:00"},
+        ],
+    }
+    assert _determine_shipment_verdict([], [shipment]) == "on_time"
+    assert _check_timeline_complete([], [shipment]) is True
+    late_shipment = {**shipment, "delivered_carrier_at": "2018-04-14T09:00:00-03:00"}
+    assert _determine_shipment_verdict([], [late_shipment]) == "seller_delay"
+    assert _extract_late_sellers([], [late_shipment]) == {"SELLER_1"}
