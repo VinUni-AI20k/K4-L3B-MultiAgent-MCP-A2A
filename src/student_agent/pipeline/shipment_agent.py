@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from typing import Any
 from ..mcp_gateway import EvidenceGateway
 from ..trace import TraceWriter
 from .models import CaseEvidenceContext, ShipmentFindings
@@ -24,7 +23,9 @@ class ShipmentAgent:
         try:
             cached_shipment = context.get_cached("get_shipment_summary", {"order_id": order_id})
             if cached_shipment is None:
-                ship_ev = await self.gateway.call("get_shipment_summary", case_id=case_id, order_id=order_id)
+                ship_ev = await self.gateway.call(
+                    "get_shipment_summary", case_id=case_id, order_id=order_id
+                )
                 context.set_cached("get_shipment_summary", {"order_id": order_id}, ship_ev)
             else:
                 ship_ev = cached_shipment
@@ -56,9 +57,14 @@ class ShipmentAgent:
             for limit in limits:
                 limit_at = limit.get("shipping_limit_at")
                 seller_id = limit.get("seller_id")
-                if carrier_at and limit_at and carrier_at > limit_at:
-                    if seller_id and seller_id not in late_sellers:
-                        late_sellers.append(seller_id)
+                if (
+                    carrier_at
+                    and limit_at
+                    and carrier_at > limit_at
+                    and seller_id
+                    and seller_id not in late_sellers
+                ):
+                    late_sellers.append(seller_id)
 
             findings.late_seller_ids = late_sellers
             findings.is_seller_delay = len(late_sellers) > 0

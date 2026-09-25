@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 from typing import Any
+
 from ..mcp_gateway import EvidenceGateway
 from ..trace import TraceWriter
 from .models import CaseEvidenceContext, OrderFindings
 
 
 class OrderAgent:
-    """Specialist responsible for order status, item inventory, seller details and catalog context."""
+    """Specialist responsible for order status, item inventory,
+    seller details and catalog context.
+    """
 
     def __init__(self, gateway: EvidenceGateway, trace: TraceWriter) -> None:
         self.gateway = gateway
@@ -51,7 +54,9 @@ class OrderAgent:
         try:
             cached_items = context.get_cached("get_order_items", {"order_id": order_id})
             if cached_items is None:
-                items_ev = await self.gateway.call("get_order_items", case_id=case_id, order_id=order_id)
+                items_ev = await self.gateway.call(
+                    "get_order_items", case_id=case_id, order_id=order_id
+                )
                 context.set_cached("get_order_items", {"order_id": order_id}, items_ev)
             else:
                 items_ev = cached_items
@@ -68,8 +73,14 @@ class OrderAgent:
             )
             items_data = items_ev["data"]
             findings.items = items_data
-            findings.item_ids = list(dict.fromkeys(item.get("order_item_id") for item in items_data if item.get("order_item_id")))
-            findings.seller_ids = list(dict.fromkeys(item.get("seller_id") for item in items_data if item.get("seller_id")))
+            findings.item_ids = list(
+                dict.fromkeys(
+                    item.get("order_item_id") for item in items_data if item.get("order_item_id")
+                )
+            )
+            findings.seller_ids = list(
+                dict.fromkeys(item.get("seller_id") for item in items_data if item.get("seller_id"))
+            )
             for item in items_data:
                 try:
                     findings.total_items_price_brl += float(item.get("price", 0.0))
@@ -83,7 +94,9 @@ class OrderAgent:
         try:
             cached_sellers = context.get_cached("get_sellers", {"order_id": order_id})
             if cached_sellers is None:
-                sellers_ev = await self.gateway.call("get_sellers", case_id=case_id, order_id=order_id)
+                sellers_ev = await self.gateway.call(
+                    "get_sellers", case_id=case_id, order_id=order_id
+                )
                 context.set_cached("get_sellers", {"order_id": order_id}, sellers_ev)
             else:
                 sellers_ev = cached_sellers
@@ -111,7 +124,9 @@ class OrderAgent:
             try:
                 cached_prod = context.get_cached("get_product_context", {"order_id": order_id})
                 if cached_prod is None:
-                    prod_ev = await self.gateway.call("get_product_context", case_id=case_id, order_id=order_id)
+                    prod_ev = await self.gateway.call(
+                        "get_product_context", case_id=case_id, order_id=order_id
+                    )
                     context.set_cached("get_product_context", {"order_id": order_id}, prod_ev)
                 else:
                     prod_ev = cached_prod
@@ -128,7 +143,9 @@ class OrderAgent:
                 )
                 prod_data = prod_ev["data"]
                 for p in prod_data:
-                    cat = p.get("category_name_english") or (p.get("product", {}) or {}).get("product_category_name")
+                    cat = p.get("category_name_english") or (p.get("product", {}) or {}).get(
+                        "product_category_name"
+                    )
                     if cat and cat not in findings.product_categories:
                         findings.product_categories.append(cat)
             except Exception:

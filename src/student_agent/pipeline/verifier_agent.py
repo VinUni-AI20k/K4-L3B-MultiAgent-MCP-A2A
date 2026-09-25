@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Any
+
 from ..contracts import Contracts
 from ..trace import TraceWriter
 from .models import (
@@ -15,7 +16,7 @@ from .models import (
 
 
 class VerifierAgent:
-    """Specialist responsible for auditing math, timelines, provenance, and final output contracts."""
+    """Audits math, timelines, provenance, and final output contracts."""
 
     def __init__(self, trace: TraceWriter, contracts: Contracts) -> None:
         self.trace = trace
@@ -55,12 +56,14 @@ class VerifierAgent:
             else:
                 refs_for_claim = order_findings.evidence_refs or all_collected_refs[:2]
 
-            claim_assessments.append({
-                "claim_id": cid,
-                "verdict": verdict,
-                "confidence": round(adjudication.confidence, 2),
-                "evidence_refs": list(dict.fromkeys(refs_for_claim))[:5],
-            })
+            claim_assessments.append(
+                {
+                    "claim_id": cid,
+                    "verdict": verdict,
+                    "confidence": round(adjudication.confidence, 2),
+                    "evidence_refs": list(dict.fromkeys(refs_for_claim))[:5],
+                }
+            )
 
         # 3. Consistency and Financial math
         captured = payment_findings.captured_total_brl
@@ -70,35 +73,43 @@ class VerifierAgent:
 
         refund_lines = []
         if refund_brl > 0:
-            refund_lines.append({
-                "reason_code": adjudication.recommended_action.upper(),
-                "amount_brl": round(refund_brl, 2),
-                "entity_id": resolved_order_id,
-            })
+            refund_lines.append(
+                {
+                    "reason_code": adjudication.recommended_action.upper(),
+                    "amount_brl": round(refund_brl, 2),
+                    "entity_id": resolved_order_id,
+                }
+            )
 
         # 4. Data conflicts resolution
         data_conflicts = []
         if adjudication.primary_issue == "unsupported_claim":
-            data_conflicts.append({
-                "field": "delivery_sla",
-                "sources": ["customer_report", "carrier_telemetry"],
-                "selected_source": "carrier_telemetry",
-                "resolution_code": "TELEMETRY_CONFIRMS_ON_TIME_DELIVERY",
-            })
+            data_conflicts.append(
+                {
+                    "field": "delivery_sla",
+                    "sources": ["customer_report", "carrier_telemetry"],
+                    "selected_source": "carrier_telemetry",
+                    "resolution_code": "TELEMETRY_CONFIRMS_ON_TIME_DELIVERY",
+                }
+            )
         elif adjudication.primary_issue == "valid_split_payment":
-            data_conflicts.append({
-                "field": "payment_structure",
-                "sources": ["customer_report", "gateway_audit"],
-                "selected_source": "gateway_audit",
-                "resolution_code": "LEGITIMATE_SPLIT_PAYMENT_VERIFIED",
-            })
+            data_conflicts.append(
+                {
+                    "field": "payment_structure",
+                    "sources": ["customer_report", "gateway_audit"],
+                    "selected_source": "gateway_audit",
+                    "resolution_code": "LEGITIMATE_SPLIT_PAYMENT_VERIFIED",
+                }
+            )
         elif adjudication.primary_issue in ("late_delivery_seller", "late_delivery_logistics"):
-            data_conflicts.append({
-                "field": "delivery_timeline",
-                "sources": ["customer_statement", "carrier_telemetry"],
-                "selected_source": "carrier_telemetry",
-                "resolution_code": "LOGISTICS_MILESTONE_CONFIRMED",
-            })
+            data_conflicts.append(
+                {
+                    "field": "delivery_timeline",
+                    "sources": ["customer_statement", "carrier_telemetry"],
+                    "selected_source": "carrier_telemetry",
+                    "resolution_code": "LOGISTICS_MILESTONE_CONFIRMED",
+                }
+            )
 
         # 5. Resolution actions
         actions = [adjudication.recommended_action]
@@ -151,9 +162,7 @@ class VerifierAgent:
                 "refundable_total_brl": round(payment_findings.refundable_total_brl, 2),
             },
             "root_cause_analysis": {
-                "ranked_causes": [
-                    {"cause_code": adjudication.cause_code, "rank": 1}
-                ],
+                "ranked_causes": [{"cause_code": adjudication.cause_code, "rank": 1}],
                 "responsible_parties": adjudication.responsible_parties[:5],
             },
             "evidence_refs": all_collected_refs,

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 from typing import Any
+
 from google import genai
 from google.genai import types
 
@@ -18,7 +19,6 @@ from .models import (
     ShipmentFindings,
 )
 from .prompts import POLICY_AGENT_SYSTEM_PROMPT
-
 
 CAUSE_CODE_MAP = {
     "canceled_order_paid": "CANCELED_ORDER_PAID",
@@ -36,7 +36,7 @@ CAUSE_CODE_MAP = {
 
 
 class PolicyAgent:
-    """Specialist responsible for policy interpretation, conflict reconciliation, and adjudication."""
+    """Specialist responsible for policy, conflict reconciliation, and adjudication."""
 
     def __init__(self, gateway: EvidenceGateway, trace: TraceWriter) -> None:
         self.gateway = gateway
@@ -61,7 +61,9 @@ class PolicyAgent:
         # 1. Fetch policy from MCP
         cached_policy = context.get_cached("get_policy", {"policy_version": policy_version})
         if cached_policy is None:
-            policy_ev = await self.gateway.call("get_policy", case_id=case_id, policy_version=policy_version)
+            policy_ev = await self.gateway.call(
+                "get_policy", case_id=case_id, policy_version=policy_version
+            )
             context.set_cached("get_policy", {"policy_version": policy_version}, policy_ev)
         else:
             policy_ev = cached_policy
@@ -97,8 +99,8 @@ class PolicyAgent:
                 "policy_rules": policy_rules,
             }
             user_prompt = (
-                "Analyze the following dispute telemetry against policy rules and return the adjudication draft:\n"
-                + json.dumps(prompt_payload, indent=2)
+                "Analyze the following dispute telemetry against policy rules and return "
+                "the adjudication draft:\n" + json.dumps(prompt_payload, indent=2)
             )
             config = types.GenerateContentConfig(
                 system_instruction=POLICY_AGENT_SYSTEM_PROMPT,
@@ -119,7 +121,6 @@ class PolicyAgent:
                     continue
 
         # 3. Authoritative Policy Rule Alignment
-        # Match primary issue to ground truth policy
         primary_issue = primary_claimed_topic
         if primary_issue not in policy_rules:
             if gemini_draft and gemini_draft.primary_issue in policy_rules:
@@ -153,6 +154,14 @@ class PolicyAgent:
 
         # 4. Claim Assessments
         claim_verdicts: dict[str, str] = {}
+        partial_topics = (
+            "late_delivery_seller",
+            "late_delivery_logistics",
+            "duplicate_charge",
+            "payment_mismatch",
+            "refund_failed",
+            "refund_pending",
+        )
         for c in claims:
             cid = c.get("claim_id")
             topic = c.get("topic")
@@ -166,9 +175,7 @@ class PolicyAgent:
             elif topic == "requested_full_refund":
                 if primary_issue in ("canceled_order_paid", "unavailable_order_paid"):
                     claim_verdicts[cid] = "supported"
-                elif primary_issue in ("late_delivery_seller", "late_delivery_logistics", "duplicate_charge", "payment_mismatch", "refund_failed"):
-                    claim_verdicts[cid] = "partially_supported"
-                elif primary_issue == "refund_pending":
+                elif primary_issue in partial_topics:
                     claim_verdicts[cid] = "partially_supported"
                 else:
                     claim_verdicts[cid] = "unsupported"
@@ -176,7 +183,12 @@ class PolicyAgent:
                 claim_verdicts[cid] = "unsupported"
 
         # Secondary issues
-        secondary_issues = ["requested_full_refund"] if "requested_full_refund" in claimed_topics and primary_issue != "requested_full_refund" else []
+        has_full_refund_claim = "requested_full_refund" in claimed_topics
+        secondary_issues = (
+            ["requested_full_refund"]
+            if has_full_refund_claim and primary_issue != "requested_full_refund"
+            else []
+        )
 
         # Confidence calibration
         if primary_issue in ("unsupported_claim", "refund_pending"):
@@ -186,6 +198,7 @@ class PolicyAgent:
         else:
             confidence = 0.96
 
+        fallback_rationale = f"Resolved based on {policy_version} rule {primary_issue}."
         final_adjudication = AdjudicationDraft(
             primary_issue=primary_issue,
             secondary_issues=secondary_issues,
@@ -196,7 +209,7 @@ class PolicyAgent:
             cause_code=cause_code,
             responsible_parties=responsible_parties,
             claim_verdicts=claim_verdicts,
-            rationale=gemini_draft.rationale if gemini_draft else f"Resolved based on {policy_version} rule {primary_issue}.",
+            rationale=gemini_draft.rationale if gemini_draft else fallback_rationale,
         )
 
         self.trace.emit(

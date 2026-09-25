@@ -6,6 +6,7 @@ import secrets
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Literal
+
 from pydantic import BaseModel, Field
 
 
@@ -25,10 +26,14 @@ class A2AMessage:
     )
 
     def next_hop(
-        self, recipient: str, intent: Literal["task_assign", "task_result", "clarification_request", "handoff", "abort"], payload: dict[str, Any]
+        self,
+        recipient: str,
+        intent: Literal["task_assign", "task_result", "clarification_request", "handoff", "abort"],
+        payload: dict[str, Any],
     ) -> A2AMessage:
         if self.hop_count >= 10:
-            raise RuntimeError(f"A2A cycle detected: max hop count (10) exceeded for case {self.case_id}")
+            err = f"A2A cycle detected: max hop count (10) exceeded for case {self.case_id}"
+            raise RuntimeError(err)
         return A2AMessage(
             case_id=self.case_id,
             sender=self.recipient,
@@ -62,7 +67,9 @@ class CaseEvidenceContext:
         key = self.get_cache_key(tool_name, arguments)
         return self._cache.get(key)
 
-    def set_cached(self, tool_name: str, arguments: dict[str, Any], evidence: dict[str, Any]) -> None:
+    def set_cached(
+        self, tool_name: str, arguments: dict[str, Any], evidence: dict[str, Any]
+    ) -> None:
         key = self.get_cache_key(tool_name, arguments)
         self._cache[key] = evidence
         self.record_evidence(tool_name, evidence)
@@ -84,7 +91,7 @@ class OrderFindings(BaseModel):
 
 class PaymentFindings(BaseModel):
     order_id: str
-    verdict: str  # reconciled, capture_mismatch, duplicate_capture, refund_pending, refund_failed, refunded, insufficient_evidence
+    verdict: str  # reconciled, capture_mismatch, duplicate_capture, etc.
     captured_total_brl: float = 0.0
     refunded_total_brl: float = 0.0
     refundable_total_brl: float = 0.0
@@ -101,7 +108,7 @@ class PaymentFindings(BaseModel):
 
 class ShipmentFindings(BaseModel):
     order_id: str
-    verdict: str  # on_time, seller_delay, logistics_delay, lost, returned, conflicting, insufficient_evidence
+    verdict: str  # on_time, seller_delay, logistics_delay, lost, etc.
     delivered_carrier_at: str | None = None
     delivered_customer_at: str | None = None
     estimated_delivery_at: str | None = None

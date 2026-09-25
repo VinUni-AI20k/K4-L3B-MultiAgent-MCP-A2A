@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from typing import Any
+
 from ..contracts import Contracts
 from ..mcp_gateway import EvidenceGateway
 from ..trace import TraceWriter
@@ -42,7 +43,9 @@ class CoordinatorAgent:
         customer_unique_id: str | None = hint
         if hint:
             try:
-                cust_ev = await self.gateway.call("get_customer_history", case_id=case_id, customer_unique_id=hint)
+                cust_ev = await self.gateway.call(
+                    "get_customer_history", case_id=case_id, customer_unique_id=hint
+                )
                 context.record_evidence("get_customer_history", cust_ev)
                 ref = cust_ev["evidence_ref"]
                 self.trace.emit(

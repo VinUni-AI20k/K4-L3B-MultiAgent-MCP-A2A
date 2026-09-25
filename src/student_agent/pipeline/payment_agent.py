@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Any
+
 from ..mcp_gateway import EvidenceGateway
 from ..trace import TraceWriter
 from .models import CaseEvidenceContext, PaymentFindings
@@ -26,7 +27,9 @@ class PaymentAgent:
         try:
             cached_payments = context.get_cached("get_order_payments", {"order_id": order_id})
             if cached_payments is None:
-                pay_ev = await self.gateway.call("get_order_payments", case_id=case_id, order_id=order_id)
+                pay_ev = await self.gateway.call(
+                    "get_order_payments", case_id=case_id, order_id=order_id
+                )
                 context.set_cached("get_order_payments", {"order_id": order_id}, pay_ev)
             else:
                 pay_ev = cached_payments
@@ -47,7 +50,7 @@ class PaymentAgent:
                 val = float(p.get("payment_value", 0.0))
                 findings.captured_total_brl += val
                 seq = p.get("payment_sequential", idx + 1)
-                findings.payment_references.append(f"pay_{order_id[:8]}_{seq}_{idx+1}")
+                findings.payment_references.append(f"pay_{order_id[:8]}_{seq}_{idx + 1}")
         except Exception:
             pass
 
@@ -56,7 +59,9 @@ class PaymentAgent:
         try:
             cached_pt = context.get_cached("get_payment_timeline", {"order_id": order_id})
             if cached_pt is None:
-                pt_ev = await self.gateway.call("get_payment_timeline", case_id=case_id, order_id=order_id)
+                pt_ev = await self.gateway.call(
+                    "get_payment_timeline", case_id=case_id, order_id=order_id
+                )
                 context.set_cached("get_payment_timeline", {"order_id": order_id}, pt_ev)
             else:
                 pt_ev = cached_pt
@@ -80,14 +85,14 @@ class PaymentAgent:
                 if ev_type == "reconciliation_mismatch" and status == "open":
                     findings.has_mismatch = True
 
-            # Detect duplicate capture in events (e.g. multiple captured events with exact same amount within hours)
+            # Detect duplicate captures in events
             captured_events = [ev for ev in timeline_events if ev.get("event_type") == "captured"]
             if len(captured_events) >= 2:
-                # Check for duplicate amounts
                 amounts = [ev.get("amount_brl") for ev in captured_events]
-                if len(amounts) != len(set(amounts)) and len(captured_events) > len(payments_data):
-                    findings.has_duplicate_capture = True
-                elif len(amounts) >= 4 and len(set(amounts)) == 1:
+                has_dup_amt = len(amounts) != len(set(amounts))
+                more_events_than_rows = len(captured_events) > len(payments_data)
+                four_identical = len(amounts) >= 4 and len(set(amounts)) == 1
+                if (has_dup_amt and more_events_than_rows) or four_identical:
                     findings.has_duplicate_capture = True
 
         except Exception:
@@ -98,7 +103,9 @@ class PaymentAgent:
         try:
             cached_rt = context.get_cached("get_refund_timeline", {"order_id": order_id})
             if cached_rt is None:
-                rt_ev = await self.gateway.call("get_refund_timeline", case_id=case_id, order_id=order_id)
+                rt_ev = await self.gateway.call(
+                    "get_refund_timeline", case_id=case_id, order_id=order_id
+                )
                 context.set_cached("get_refund_timeline", {"order_id": order_id}, rt_ev)
             else:
                 rt_ev = cached_rt
@@ -127,10 +134,10 @@ class PaymentAgent:
                     findings.refunded_total_brl += amt
 
         except Exception:
-            # Tool failure means no refund timeline exists for this order
             pass
 
-        findings.refundable_total_brl = max(0.0, round(findings.captured_total_brl - findings.refunded_total_brl, 2))
+        remaining = findings.captured_total_brl - findings.refunded_total_brl
+        findings.refundable_total_brl = max(0.0, round(remaining, 2))
         findings.captured_total_brl = round(findings.captured_total_brl, 2)
         findings.refunded_total_brl = round(findings.refunded_total_brl, 2)
 
