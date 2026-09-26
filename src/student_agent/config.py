@@ -16,6 +16,9 @@ class Settings:
     team_api_key: str
     mcp_endpoint: str
     root: Path
+    orchestrator_model: str = "qwen3:8b"
+    specialist_model: str = "qwen3:1.7b"
+    ollama_host: str = "http://localhost:11434"
 
     @classmethod
     def load(cls, root: Path | None = None) -> Settings:
@@ -24,6 +27,9 @@ class Settings:
         api_url = os.getenv("COMPETITION_API_URL", "").strip().rstrip("/")
         team_key = os.getenv("COMPETITION_TEAM_API_KEY", "").strip()
         mcp_endpoint = os.getenv("MCP_ENDPOINT", "").strip()
+        orchestrator_model = os.getenv("ORCHESTRATOR_MODEL", "qwen3:8b").strip()
+        specialist_model = os.getenv("SPECIALIST_MODEL", "qwen3:1.7b").strip()
+        ollama_host = os.getenv("OLLAMA_HOST", "http://localhost:11434").strip()
         errors: list[str] = []
         if not api_url.startswith(("http://", "https://")):
             errors.append("COMPETITION_API_URL must be an absolute HTTP(S) URL")
@@ -33,4 +39,12 @@ class Settings:
             errors.append("MCP_ENDPOINT must be an absolute HTTP(S) URL")
         if errors:
             raise ValueError("; ".join(errors))
-        return cls(api_url, team_key, mcp_endpoint, resolved_root)
+        return cls(
+            competition_api_url=api_url,
+            team_api_key=team_key,
+            mcp_endpoint=mcp_endpoint,
+            root=resolved_root,
+            orchestrator_model=orchestrator_model or "qwen3:8b",
+            specialist_model=specialist_model or "qwen3:1.7b",
+            ollama_host=ollama_host or "http://localhost:11434",
+        )

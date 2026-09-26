@@ -58,3 +58,44 @@ def load_case_set(root: Path, expected_count: int = 100) -> CaseSet:
         if case.get("case_id") != case_id:
             raise ValueError(f"inputs/{case_id}.json has a mismatched case_id")
     return CaseSet(version, VARIANT_ID, tuple(raw_ids), cases)
+
+
+def extract_case_details(case: dict[str, Any]) -> dict[str, Any]:
+    """Uniformly extract normalized attributes from input case JSON."""
+    case_id = str(case.get("case_id") or "")
+    customer_request = case.get("customer_request", {})
+    if not isinstance(customer_request, dict):
+        customer_request = {}
+
+    claims = customer_request.get("claims") or case.get("claims") or []
+    claimed_order_id = customer_request.get("claimed_order_id")
+    message = customer_request.get("message") or ""
+    language = customer_request.get("language") or "vi"
+
+    candidate_order_ids = case.get("candidate_order_ids") or []
+    hints = case.get("hints", {})
+    if not isinstance(hints, dict):
+        hints = {}
+
+    customer_unique_id = (
+        case.get("customer_unique_id_hint")
+        or case.get("customer_unique_id")
+        or hints.get("customer_unique_id")
+    )
+    policy_version = case.get("policy_version") or "EC_POLICY_V2"
+    investigation_scope = case.get("investigation_scope") or {}
+    opened_at = case.get("opened_at")
+
+    return {
+        "case_id": case_id,
+        "claims": claims,
+        "claimed_order_id": claimed_order_id,
+        "message": message,
+        "language": language,
+        "candidate_order_ids": candidate_order_ids,
+        "customer_unique_id": customer_unique_id,
+        "policy_version": policy_version,
+        "investigation_scope": investigation_scope,
+        "opened_at": opened_at,
+    }
+
