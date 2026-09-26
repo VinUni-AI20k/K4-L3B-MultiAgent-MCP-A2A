@@ -1,0 +1,108 @@
+{
+  "case": {
+    "case_id": "L3B_CASE_021",
+    "opened_at": "2018-03-21T09:00:00-03:00",
+    "customer_request": {
+      "language": "vi",
+      "message": "Điều tra đa nguồn: resolve đúng order, kiểm tra customer history, shipment, payment và policy trước khi kết luận.",
+      "claimed_order_id": "405be8487a7fde1db0bc31ad6b08050a",
+      "claims": [
+        {
+          "claim_id": "claim-021-a",
+          "topic": "late_delivery_logistics"
+        },
+        {
+          "claim_id": "claim-021-b",
+          "topic": "requested_full_refund"
+        }
+      ]
+    },
+    "policy_version": "EC_POLICY_V2",
+    "candidate_order_ids": [
+      "405be8487a7fde1db0bc31ad6b08050a",
+      "candidate-021"
+    ],
+    "investigation_scope": {
+      "include_customer_history": true,
+      "include_product_context": true,
+      "require_independent_verification": true
+    },
+    "customer_unique_id_hint": "customer-31ad6b08050a"
+  },
+  "calls": {
+    "get_policy": {
+      "args": {
+        "policy_version": "EC_POLICY_V2"
+      },
+      "evidence": null
+    },
+    "get_order": {
+      "args": {
+        "order_id": "405be8487a7fde1db0bc31ad6b08050a"
+      },
+      "evidence": null
+    }
+  },
+  "errors": [
+    "get_policy: MCP tool get_policy failed: Error executing tool get_policy",
+    "get_order: MCP tool get_order failed: Error executing tool get_order"
+  ],
+  "output": {
+    "schema_version": "day09-l3b-output-v2",
+    "case_id": "L3B_CASE_021",
+    "assessment": {
+      "primary_issue": "insufficient_evidence",
+      "secondary_issues": [],
+      "case_status": "needs_investigation",
+      "confidence": 0.2
+    },
+    "affected_entities": {
+      "order_ids": [],
+      "item_ids": [],
+      "seller_ids": [],
+      "payment_references": [],
+      "shipment_ids": []
+    },
+    "entity_resolution": {
+      "status": "not_found",
+      "resolved_order_ids": [],
+      "rejected_candidates": [
+        "405be8487a7fde1db0bc31ad6b08050a",
+        "candidate-021"
+      ],
+      "confidence": 0.2
+    },
+    "customer_context": {
+      "customer_unique_id": "customer-31ad6b08050a",
+      "related_order_ids": []
+    },
+    "shipment_analysis": {
+      "verdict": "insufficient_evidence",
+      "late_seller_ids": [],
+      "timeline_complete": false
+    },
+    "payment_analysis": {
+      "verdict": "insufficient_evidence",
+      "captured_total_brl": null,
+      "refunded_total_brl": null,
+      "refundable_total_brl": null
+    },
+    "root_cause_analysis": {
+      "ranked_causes": [],
+      "responsible_parties": [
+        {
+          "party_type": "unknown",
+          "party_id": null
+        }
+      ]
+    },
+    "evidence_refs": [],
+    "data_conflicts": [],
+    "financial_resolution": {
+      "currency": "BRL",
+      "recommended_refund_brl": 0.0,
+      "refund_lines": []
+    },
+    "resolution_actions": []
+  }
+}

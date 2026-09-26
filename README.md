@@ -1,5 +1,9 @@
 # K4 L3B — Multi-Agent MCP + A2A
 
+Hướng dẫn bản triển khai Qwen3/Ollama trên Windows: [HUONG_DAN_CHAY.md](HUONG_DAN_CHAY.md).
+`solve_case` đã có workflow, tool discovery, cache theo case và verifier. Chạy `day09 check-model`
+để kiểm tra model; `day09 run` tự mở run L3B trên workspace trước khi yêu cầu evidence.
+
 ## Mục tiêu
 
 Xây dựng hệ thống multi-agent điều tra khiếu nại thương mại điện tử.
