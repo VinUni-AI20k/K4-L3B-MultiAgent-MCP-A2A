@@ -261,16 +261,54 @@ class ConflictResolverAgent:
         final_secondary: list[str] = []
         final_case_status = case_status
 
+        def valid_conflict(value: Any) -> bool:
+            if not isinstance(value, dict):
+                return False
+            sources = value.get("sources")
+            return (
+                isinstance(value.get("field"), str)
+                and bool(value["field"].strip())
+                and isinstance(sources, list)
+                and 2 <= len(sources) <= 5
+                and len(set(sources)) == len(sources)
+                and all(isinstance(source, str) and bool(source.strip()) for source in sources)
+                and isinstance(value.get("resolution_code"), str)
+                and bool(value["resolution_code"].strip())
+                and (
+                    value.get("selected_source") is None
+                    or isinstance(value.get("selected_source"), str)
+                )
+            )
+
         if parsed:
             p_issue = parsed.get("primary_issue")
             if p_issue in VALID_PRIMARY_ISSUES:
                 final_primary = p_issue
             if isinstance(parsed.get("secondary_issues"), list):
-                final_secondary = [str(s) for s in parsed["secondary_issues"]][:5]
+                for issue in parsed["secondary_issues"]:
+                    if isinstance(issue, str):
+                        normalized_issue = issue.strip()
+                    elif isinstance(issue, dict):
+                        normalized_issue = str(
+                            issue.get("issue")
+                            or issue.get("code")
+                            or issue.get("resolution_code")
+                            or issue.get("field")
+                            or "secondary_issue"
+                        )
+                    else:
+                        normalized_issue = str(issue)
+                    if normalized_issue:
+                        final_secondary.append(normalized_issue[:80])
+                final_secondary = list(dict.fromkeys(final_secondary))[:5]
             if parsed.get("case_status") in ["action_required", "no_action", "needs_investigation"]:
                 final_case_status = parsed["case_status"]
-            if isinstance(parsed.get("data_conflicts"), list) and parsed["data_conflicts"]:
-                data_conflicts = parsed["data_conflicts"][:5]
+            if isinstance(parsed.get("data_conflicts"), list):
+                model_conflicts = [
+                    conflict for conflict in parsed["data_conflicts"] if valid_conflict(conflict)
+                ]
+                if model_conflicts:
+                    data_conflicts = model_conflicts[:5]
 
         # Enforce consistency guarantees
         if final_primary == "unsupported_claim":

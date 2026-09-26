@@ -383,7 +383,9 @@ class PolicyAgent:
             "get_policy", "lookup_policy", "get_ecommerce_policy"
         )
         if policy_tool:
-            res = await evidence_mgr.call_tool(policy_tool, actor=self.actor_name, policy_id="EC_POLICY_V2")
+            res = await evidence_mgr.call_tool(
+                policy_tool, actor=self.actor_name, policy_version="EC_POLICY_V2"
+            )
             if res and res.get("data"):
                 policy_data = res["data"]
 
