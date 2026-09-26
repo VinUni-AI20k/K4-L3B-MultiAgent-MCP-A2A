@@ -16,6 +16,10 @@ trong phạm vi case hiện tại. Verifier kiểm tra output trước khi CLI g
 `EvidenceGateway.call()` là boundary duy nhất để gọi MCP. Mọi request đều truyền đúng `case_id`,
 kiểm tra tool name/case ID không rỗng và xác thực envelope theo `mcp-evidence-response-v1`.
 
+Trước batch run, CLI gọi Competition API để khởi tạo active L3B run, kiểm tra `case_set_version`
+và xác nhận MCP endpoint do server trả về khớp cấu hình local. Tool discovery chỉ xác nhận kết nối;
+không thay thế bước khởi tạo run hoặc quyền gọi evidence.
+
 Gateway trả nguyên object do server trả về. Client không được tự tạo, hash, chuẩn hóa, thay thế
 hoặc sửa `evidence_ref`.
 
@@ -27,8 +31,8 @@ MCP call thất bại không tạo evidence hoặc trace reference giả.
 
 | Actor | Input | Trách nhiệm | Tool permission | Output/handoff |
 | --- | --- | --- | --- | --- |
-| Entity Agent | Claimed/candidate order IDs, customer hint | Xác minh candidate, xếp hạng và tính confidence | `get_order` | `EntityResolution` |
-| Coordinator | Request, claims, entity result | Chuẩn hóa, route worker, cache và merge | Không gọi domain tool | Case plan, task assignment |
+| Entity Agent | Claimed/candidate order IDs, customer hint | Xác minh candidate, xếp hạng và tính confidence; lấy customer history khi có hint | `get_order`, `get_customer_history` | `EntityResolution` và customer context |
+| Coordinator | Request, claims, entity result | Chuẩn hóa, route worker, cache và merge; lấy product context cho order đã resolve | `get_product_context` | Case plan, task assignment |
 | Order/Item Agent | Resolved order IDs | Lấy item/seller identity | `get_order_items` | Item/seller data |
 | Shipment Agent | Resolved order IDs | So sánh ngày hẹn/thực tế và phân định trách nhiệm | `get_order`, `get_order_items`, `get_shipment_summary` | `shipment_analysis` |
 | Payment Agent | Resolved order IDs | Đối soát payment/refund | `get_order_payments`, `get_refund_timeline` | `payment_analysis` |
@@ -55,7 +59,9 @@ refs. Không ghi suy luận nội bộ vào trace.
 ## 5. Evidence and conflict lifecycle
 
 `InvestigationContext` có vòng đời theo từng case và cache theo `(tool, arguments)`. Cache không
-được chia sẻ giữa các case; cùng một tool call trong một case chỉ gọi MCP một lần.
+được chia sẻ giữa các case; cùng một tool call trong một case chỉ gọi MCP một lần. Batch giới hạn
+tối đa 4 case chạy đồng thời; các output và trace được ghi vào thư mục staging, chỉ chuyển sang
+thư mục chính sau khi toàn bộ batch và validation hoàn tất.
 
 Evidence flow:
 
@@ -81,7 +87,8 @@ hoặc policy window không xác định đều giữ trạng thái thiếu evid
 
 Query budget theo từng case và deterministic. Candidate resolution gọi `get_order` một lần mỗi
 candidate; specialist chỉ gọi domain tool cho order đã resolve. Cache loại bỏ call trùng, không
-quét rộng và không retry tự động. Missing evidence không biến thành dữ liệu phỏng đoán.
+quét rộng và không retry tự động. Active run phải được khởi tạo trước batch. Missing evidence không
+biến thành dữ liệu phỏng đoán.
 
 ## 7. Verification invariants
 
