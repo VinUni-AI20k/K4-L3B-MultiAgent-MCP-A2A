@@ -40,24 +40,15 @@ REFUND_ISSUES = {"refund_pending", "refund_failed"}
 PAYMENT_ISSUES = {"valid_split_payment", "payment_mismatch", "duplicate_charge"}
 FULL_REFUND_ISSUES = {"canceled_order_paid", "unavailable_order_paid"}
 
-# Chi trich dan domain lien quan toi tung loai issue.
-# (Trich moi domain => server cham 0 toan bai: da kiem chung qua 3 lan nop.)
-EVIDENCE_ORDER = ("policy", "order", "customer", "item", "seller", "shipment", "payment", "refund")
+# Domain evidence dua vao output theo tung loai issue (tranh trich evidence khong lien quan).
 RELEVANT_DOMAINS = {
     "late_delivery_seller": {"policy", "order", "item", "shipment", "customer"},
     "late_delivery_logistics": {"policy", "order", "item", "shipment", "customer"},
-    "canceled_order_paid": {"policy", "order", "item", "payment", "customer"},
-    "unavailable_order_paid": {"policy", "order", "item", "payment", "customer"},
-    "valid_split_payment": {"policy", "order", "item", "payment", "customer"},
-    "payment_mismatch": {"policy", "order", "item", "payment", "customer"},
-    "duplicate_charge": {"policy", "order", "item", "payment", "customer"},
     "refund_pending": {"policy", "order", "payment", "refund", "customer"},
     "refund_failed": {"policy", "order", "payment", "refund", "customer"},
     "unsupported_claim": {"policy", "order", "shipment", "payment", "customer"},
     "insufficient_evidence": {"policy", "order", "customer"},
 }
-# Ngan sach 6 call/case: case refund doi get_order_items lay get_refund_timeline.
-
 
 # ---------------------------------------------------------------- helpers
 def _num(value: Any) -> float | None:
@@ -546,7 +537,7 @@ async def _solve(ctx: CaseContext) -> dict[str, Any]:
     ctx.handoff("policy-agent", "verifier-agent", "policy_decided", ctx.refs("policy"))
 
     domains = RELEVANT_DOMAINS.get(issue, {"policy", "order"})
-    evidence_refs = _uniq(ctx.refs(*[d for d in EVIDENCE_ORDER if d in domains]))[:30]
+    evidence_refs = _uniq(ctx.refs(*sorted(domains)))[:30]
     conflicts = scen["conflicts"]
 
     claim_assessments = []
