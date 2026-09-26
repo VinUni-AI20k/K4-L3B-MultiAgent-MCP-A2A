@@ -28,9 +28,12 @@ dist/*
 !dist/.gitkeep
 *.zip
 *.log
+l3b-inputs-*/
 
 # Editors and operating systems
 .idea/
 .vscode/
 .DS_Store
 Thumbs.db
+
+debug/

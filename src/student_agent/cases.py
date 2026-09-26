@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -17,6 +18,27 @@ class CaseSet:
     variant_id: str
     case_ids: tuple[str, ...]
     cases: dict[str, dict[str, Any]]
+
+
+def prepare_inputs(root: Path, source: Path, version: str, expected_count: int = 100) -> None:
+    """Validate all source files before copying; never overwrite an existing run."""
+    files = sorted(source.glob("*.json"))
+    if len(files) != expected_count or not version.strip():
+        raise ValueError(f"Expected {expected_count} input files and an official release version")
+    ids = []
+    for path in files:
+        case_id = path.stem
+        if not CASE_ID_PATTERN.fullmatch(case_id) or _object(path).get("case_id") != case_id:
+            raise ValueError(f"Invalid case ID in {path.name}")
+        ids.append(case_id)
+    target = root / "inputs"
+    if (root / "case-set.json").exists() or any(target.glob("*.json")):
+        raise ValueError("Inputs or manifest already exist; refusing to overwrite")
+    target.mkdir(parents=True, exist_ok=True)
+    for path in files:
+        shutil.copyfile(path, target / path.name)
+    manifest = {"case_set_version": version.strip(), "variant_id": VARIANT_ID, "case_ids": ids}
+    (root / "case-set.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
 
 
 def _object(path: Path) -> dict[str, Any]:

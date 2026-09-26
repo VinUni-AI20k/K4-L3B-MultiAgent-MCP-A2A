@@ -65,6 +65,9 @@ def validate_artifacts(
         raise ValueError("traces/trace.jsonl is missing or not UTF-8") from exc
     normalized_lines: list[str] = []
     seen_events: set[str] = set()
+    consumed: dict[str, set[str]] = {case_id: set() for case_id in expected}
+    verified: set[str] = set()
+    finalized: set[str] = set()
     for number, line in enumerate(trace_lines, 1):
         if not line.strip():
             continue
@@ -78,7 +81,22 @@ def validate_artifacts(
         if event["event_id"] in seen_events:
             raise ValueError(f"traces/trace.jsonl:{number}: duplicate event_id")
         seen_events.add(event["event_id"])
+        if event["event_type"] == "tool_result_consumed":
+            consumed[event["case_id"]].update(event.get("evidence_refs", []))
+        if event["event_type"] == "verification_completed" and event.get("decision_code") == "PASS":
+            verified.add(event["case_id"])
+        if event["event_type"] == "case_finalized":
+            if event["case_id"] not in verified:
+                raise ValueError("Case finalized before successful verification")
+            finalized.add(event["case_id"])
         normalized_lines.append(json.dumps(event, ensure_ascii=False, separators=(",", ":")))
+
+    for case_id, output in outputs.items():
+        refs = set(output["evidence_refs"])
+        if not refs or not refs <= consumed[case_id]:
+            raise ValueError(f"{case_id}: output evidence is missing from its case trace")
+        if case_id not in verified or case_id not in finalized:
+            raise ValueError(f"{case_id}: missing successful verification/finalization")
 
     serialized = [json.dumps(value, ensure_ascii=False) for value in outputs.values()]
     if SECRET_PATTERN.search("\n".join([*serialized, *normalized_lines])):

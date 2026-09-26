@@ -1,0 +1,772 @@
+[
+  {
+    "name": "get_customer_history",
+    "description": "Return authoritative order history for one scoped customer identity.",
+    "input_schema": {
+      "properties": {
+        "case_id": {
+          "title": "Case Id",
+          "type": "string"
+        },
+        "customer_unique_id": {
+          "title": "Customer Unique Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "case_id",
+        "customer_unique_id"
+      ],
+      "type": "object",
+      "title": "get_customer_historyArguments"
+    },
+    "output_schema": {
+      "properties": {
+        "schema_version": {
+          "const": "day09-mcp-evidence-v1",
+          "default": "day09-mcp-evidence-v1",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "evidence_ref": {
+          "pattern": "^ev_[A-Za-z0-9_-]{20,96}$",
+          "title": "Evidence Ref",
+          "type": "string"
+        },
+        "result_hash": {
+          "pattern": "^sha256:[a-f0-9]{64}$",
+          "title": "Result Hash",
+          "type": "string"
+        },
+        "domain": {
+          "enum": [
+            "order",
+            "item",
+            "payment",
+            "shipment",
+            "seller",
+            "customer",
+            "product",
+            "refund",
+            "policy"
+          ],
+          "title": "Domain",
+          "type": "string"
+        },
+        "data": {
+          "title": "Data"
+        },
+        "warnings": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 10,
+          "title": "Warnings",
+          "type": "array"
+        }
+      },
+      "required": [
+        "evidence_ref",
+        "result_hash",
+        "domain",
+        "data"
+      ],
+      "type": "object",
+      "additionalProperties": false,
+      "title": "EvidenceResponse"
+    }
+  },
+  {
+    "name": "get_order",
+    "description": "Return the authoritative order row for one order.",
+    "input_schema": {
+      "properties": {
+        "case_id": {
+          "title": "Case Id",
+          "type": "string"
+        },
+        "order_id": {
+          "title": "Order Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "case_id",
+        "order_id"
+      ],
+      "type": "object",
+      "title": "get_orderArguments"
+    },
+    "output_schema": {
+      "properties": {
+        "schema_version": {
+          "const": "day09-mcp-evidence-v1",
+          "default": "day09-mcp-evidence-v1",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "evidence_ref": {
+          "pattern": "^ev_[A-Za-z0-9_-]{20,96}$",
+          "title": "Evidence Ref",
+          "type": "string"
+        },
+        "result_hash": {
+          "pattern": "^sha256:[a-f0-9]{64}$",
+          "title": "Result Hash",
+          "type": "string"
+        },
+        "domain": {
+          "enum": [
+            "order",
+            "item",
+            "payment",
+            "shipment",
+            "seller",
+            "customer",
+            "product",
+            "refund",
+            "policy"
+          ],
+          "title": "Domain",
+          "type": "string"
+        },
+        "data": {
+          "title": "Data"
+        },
+        "warnings": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 10,
+          "title": "Warnings",
+          "type": "array"
+        }
+      },
+      "required": [
+        "evidence_ref",
+        "result_hash",
+        "domain",
+        "data"
+      ],
+      "type": "object",
+      "additionalProperties": false,
+      "title": "EvidenceResponse"
+    }
+  },
+  {
+    "name": "get_order_items",
+    "description": "Return item and seller rows belonging to one order.",
+    "input_schema": {
+      "properties": {
+        "case_id": {
+          "title": "Case Id",
+          "type": "string"
+        },
+        "order_id": {
+          "title": "Order Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "case_id",
+        "order_id"
+      ],
+      "type": "object",
+      "title": "get_order_itemsArguments"
+    },
+    "output_schema": {
+      "properties": {
+        "schema_version": {
+          "const": "day09-mcp-evidence-v1",
+          "default": "day09-mcp-evidence-v1",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "evidence_ref": {
+          "pattern": "^ev_[A-Za-z0-9_-]{20,96}$",
+          "title": "Evidence Ref",
+          "type": "string"
+        },
+        "result_hash": {
+          "pattern": "^sha256:[a-f0-9]{64}$",
+          "title": "Result Hash",
+          "type": "string"
+        },
+        "domain": {
+          "enum": [
+            "order",
+            "item",
+            "payment",
+            "shipment",
+            "seller",
+            "customer",
+            "product",
+            "refund",
+            "policy"
+          ],
+          "title": "Domain",
+          "type": "string"
+        },
+        "data": {
+          "title": "Data"
+        },
+        "warnings": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 10,
+          "title": "Warnings",
+          "type": "array"
+        }
+      },
+      "required": [
+        "evidence_ref",
+        "result_hash",
+        "domain",
+        "data"
+      ],
+      "type": "object",
+      "additionalProperties": false,
+      "title": "EvidenceResponse"
+    }
+  },
+  {
+    "name": "get_order_payments",
+    "description": "Return payment rows and lifecycle evidence belonging to one order.",
+    "input_schema": {
+      "properties": {
+        "case_id": {
+          "title": "Case Id",
+          "type": "string"
+        },
+        "order_id": {
+          "title": "Order Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "case_id",
+        "order_id"
+      ],
+      "type": "object",
+      "title": "get_order_paymentsArguments"
+    },
+    "output_schema": {
+      "properties": {
+        "schema_version": {
+          "const": "day09-mcp-evidence-v1",
+          "default": "day09-mcp-evidence-v1",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "evidence_ref": {
+          "pattern": "^ev_[A-Za-z0-9_-]{20,96}$",
+          "title": "Evidence Ref",
+          "type": "string"
+        },
+        "result_hash": {
+          "pattern": "^sha256:[a-f0-9]{64}$",
+          "title": "Result Hash",
+          "type": "string"
+        },
+        "domain": {
+          "enum": [
+            "order",
+            "item",
+            "payment",
+            "shipment",
+            "seller",
+            "customer",
+            "product",
+            "refund",
+            "policy"
+          ],
+          "title": "Domain",
+          "type": "string"
+        },
+        "data": {
+          "title": "Data"
+        },
+        "warnings": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 10,
+          "title": "Warnings",
+          "type": "array"
+        }
+      },
+      "required": [
+        "evidence_ref",
+        "result_hash",
+        "domain",
+        "data"
+      ],
+      "type": "object",
+      "additionalProperties": false,
+      "title": "EvidenceResponse"
+    }
+  },
+  {
+    "name": "get_payment_timeline",
+    "description": "Return base payments and authoritative payment lifecycle events.",
+    "input_schema": {
+      "properties": {
+        "case_id": {
+          "title": "Case Id",
+          "type": "string"
+        },
+        "order_id": {
+          "title": "Order Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "case_id",
+        "order_id"
+      ],
+      "type": "object",
+      "title": "get_payment_timelineArguments"
+    },
+    "output_schema": {
+      "properties": {
+        "schema_version": {
+          "const": "day09-mcp-evidence-v1",
+          "default": "day09-mcp-evidence-v1",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "evidence_ref": {
+          "pattern": "^ev_[A-Za-z0-9_-]{20,96}$",
+          "title": "Evidence Ref",
+          "type": "string"
+        },
+        "result_hash": {
+          "pattern": "^sha256:[a-f0-9]{64}$",
+          "title": "Result Hash",
+          "type": "string"
+        },
+        "domain": {
+          "enum": [
+            "order",
+            "item",
+            "payment",
+            "shipment",
+            "seller",
+            "customer",
+            "product",
+            "refund",
+            "policy"
+          ],
+          "title": "Domain",
+          "type": "string"
+        },
+        "data": {
+          "title": "Data"
+        },
+        "warnings": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 10,
+          "title": "Warnings",
+          "type": "array"
+        }
+      },
+      "required": [
+        "evidence_ref",
+        "result_hash",
+        "domain",
+        "data"
+      ],
+      "type": "object",
+      "additionalProperties": false,
+      "title": "EvidenceResponse"
+    }
+  },
+  {
+    "name": "get_policy",
+    "description": "Return the public machine-readable policy for the requested version.",
+    "input_schema": {
+      "properties": {
+        "case_id": {
+          "title": "Case Id",
+          "type": "string"
+        },
+        "policy_version": {
+          "title": "Policy Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "case_id",
+        "policy_version"
+      ],
+      "type": "object",
+      "title": "get_policyArguments"
+    },
+    "output_schema": {
+      "properties": {
+        "schema_version": {
+          "const": "day09-mcp-evidence-v1",
+          "default": "day09-mcp-evidence-v1",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "evidence_ref": {
+          "pattern": "^ev_[A-Za-z0-9_-]{20,96}$",
+          "title": "Evidence Ref",
+          "type": "string"
+        },
+        "result_hash": {
+          "pattern": "^sha256:[a-f0-9]{64}$",
+          "title": "Result Hash",
+          "type": "string"
+        },
+        "domain": {
+          "enum": [
+            "order",
+            "item",
+            "payment",
+            "shipment",
+            "seller",
+            "customer",
+            "product",
+            "refund",
+            "policy"
+          ],
+          "title": "Domain",
+          "type": "string"
+        },
+        "data": {
+          "title": "Data"
+        },
+        "warnings": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 10,
+          "title": "Warnings",
+          "type": "array"
+        }
+      },
+      "required": [
+        "evidence_ref",
+        "result_hash",
+        "domain",
+        "data"
+      ],
+      "type": "object",
+      "additionalProperties": false,
+      "title": "EvidenceResponse"
+    }
+  },
+  {
+    "name": "get_product_context",
+    "description": "Return products and translated categories associated with a scoped order.",
+    "input_schema": {
+      "properties": {
+        "case_id": {
+          "title": "Case Id",
+          "type": "string"
+        },
+        "order_id": {
+          "title": "Order Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "case_id",
+        "order_id"
+      ],
+      "type": "object",
+      "title": "get_product_contextArguments"
+    },
+    "output_schema": {
+      "properties": {
+        "schema_version": {
+          "const": "day09-mcp-evidence-v1",
+          "default": "day09-mcp-evidence-v1",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "evidence_ref": {
+          "pattern": "^ev_[A-Za-z0-9_-]{20,96}$",
+          "title": "Evidence Ref",
+          "type": "string"
+        },
+        "result_hash": {
+          "pattern": "^sha256:[a-f0-9]{64}$",
+          "title": "Result Hash",
+          "type": "string"
+        },
+        "domain": {
+          "enum": [
+            "order",
+            "item",
+            "payment",
+            "shipment",
+            "seller",
+            "customer",
+            "product",
+            "refund",
+            "policy"
+          ],
+          "title": "Domain",
+          "type": "string"
+        },
+        "data": {
+          "title": "Data"
+        },
+        "warnings": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 10,
+          "title": "Warnings",
+          "type": "array"
+        }
+      },
+      "required": [
+        "evidence_ref",
+        "result_hash",
+        "domain",
+        "data"
+      ],
+      "type": "object",
+      "additionalProperties": false,
+      "title": "EvidenceResponse"
+    }
+  },
+  {
+    "name": "get_refund_timeline",
+    "description": "Return authoritative refund lifecycle events for a scoped order.",
+    "input_schema": {
+      "properties": {
+        "case_id": {
+          "title": "Case Id",
+          "type": "string"
+        },
+        "order_id": {
+          "title": "Order Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "case_id",
+        "order_id"
+      ],
+      "type": "object",
+      "title": "get_refund_timelineArguments"
+    },
+    "output_schema": {
+      "properties": {
+        "schema_version": {
+          "const": "day09-mcp-evidence-v1",
+          "default": "day09-mcp-evidence-v1",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "evidence_ref": {
+          "pattern": "^ev_[A-Za-z0-9_-]{20,96}$",
+          "title": "Evidence Ref",
+          "type": "string"
+        },
+        "result_hash": {
+          "pattern": "^sha256:[a-f0-9]{64}$",
+          "title": "Result Hash",
+          "type": "string"
+        },
+        "domain": {
+          "enum": [
+            "order",
+            "item",
+            "payment",
+            "shipment",
+            "seller",
+            "customer",
+            "product",
+            "refund",
+            "policy"
+          ],
+          "title": "Domain",
+          "type": "string"
+        },
+        "data": {
+          "title": "Data"
+        },
+        "warnings": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 10,
+          "title": "Warnings",
+          "type": "array"
+        }
+      },
+      "required": [
+        "evidence_ref",
+        "result_hash",
+        "domain",
+        "data"
+      ],
+      "type": "object",
+      "additionalProperties": false,
+      "title": "EvidenceResponse"
+    }
+  },
+  {
+    "name": "get_sellers",
+    "description": "Return seller records associated with an order's items.",
+    "input_schema": {
+      "properties": {
+        "case_id": {
+          "title": "Case Id",
+          "type": "string"
+        },
+        "order_id": {
+          "title": "Order Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "case_id",
+        "order_id"
+      ],
+      "type": "object",
+      "title": "get_sellersArguments"
+    },
+    "output_schema": {
+      "properties": {
+        "schema_version": {
+          "const": "day09-mcp-evidence-v1",
+          "default": "day09-mcp-evidence-v1",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "evidence_ref": {
+          "pattern": "^ev_[A-Za-z0-9_-]{20,96}$",
+          "title": "Evidence Ref",
+          "type": "string"
+        },
+        "result_hash": {
+          "pattern": "^sha256:[a-f0-9]{64}$",
+          "title": "Result Hash",
+          "type": "string"
+        },
+        "domain": {
+          "enum": [
+            "order",
+            "item",
+            "payment",
+            "shipment",
+            "seller",
+            "customer",
+            "product",
+            "refund",
+            "policy"
+          ],
+          "title": "Domain",
+          "type": "string"
+        },
+        "data": {
+          "title": "Data"
+        },
+        "warnings": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 10,
+          "title": "Warnings",
+          "type": "array"
+        }
+      },
+      "required": [
+        "evidence_ref",
+        "result_hash",
+        "domain",
+        "data"
+      ],
+      "type": "object",
+      "additionalProperties": false,
+      "title": "EvidenceResponse"
+    }
+  },
+  {
+    "name": "get_shipment_summary",
+    "description": "Return delivery timestamps, seller handoff limits and shipment events.",
+    "input_schema": {
+      "properties": {
+        "case_id": {
+          "title": "Case Id",
+          "type": "string"
+        },
+        "order_id": {
+          "title": "Order Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "case_id",
+        "order_id"
+      ],
+      "type": "object",
+      "title": "get_shipment_summaryArguments"
+    },
+    "output_schema": {
+      "properties": {
+        "schema_version": {
+          "const": "day09-mcp-evidence-v1",
+          "default": "day09-mcp-evidence-v1",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "evidence_ref": {
+          "pattern": "^ev_[A-Za-z0-9_-]{20,96}$",
+          "title": "Evidence Ref",
+          "type": "string"
+        },
+        "result_hash": {
+          "pattern": "^sha256:[a-f0-9]{64}$",
+          "title": "Result Hash",
+          "type": "string"
+        },
+        "domain": {
+          "enum": [
+            "order",
+            "item",
+            "payment",
+            "shipment",
+            "seller",
+            "customer",
+            "product",
+            "refund",
+            "policy"
+          ],
+          "title": "Domain",
+          "type": "string"
+        },
+        "data": {
+          "title": "Data"
+        },
+        "warnings": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 10,
+          "title": "Warnings",
+          "type": "array"
+        }
+      },
+      "required": [
+        "evidence_ref",
+        "result_hash",
+        "domain",
+        "data"
+      ],
+      "type": "object",
+      "additionalProperties": false,
+      "title": "EvidenceResponse"
+    }
+  }
+]
