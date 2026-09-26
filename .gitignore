@@ -35,3 +35,5 @@ l3b-inputs-*/
 .vscode/
 .DS_Store
 Thumbs.db
+
+debug/

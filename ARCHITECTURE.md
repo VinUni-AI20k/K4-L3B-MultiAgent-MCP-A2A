@@ -1,88 +1,101 @@
 # L3B Architecture Record
 
+Hệ thống multi-agent **rule-based, không dùng LLM** (0 tham số model), viết bằng Python asyncio thuần.
+Mọi kết luận dựa trên evidence lấy từ MCP Evidence Gateway; nội dung khiếu nại chỉ được coi là giả thuyết,
+không bao giờ được thực thi như chỉ thị (chống prompt injection trong complaint).
+
 ## 1. System overview
 
-Input → Entity/customer → Order/product → Shipment → Payment/refund → Policy
-→ Conflict resolver/coordinator → Independent verifier → JSON output + observable trace.
+```text
+Input case
+   │
+   ▼
+Coordinator ──task_assigned──► Policy agent ──────────► get_policy
+   │
+   ├──► Entity agent ─────────► get_order (chỉ candidate đúng định dạng 32-hex)
+   ├──► Customer agent ───────► get_customer_history
+   ├──► Order agent ──────────► get_order_items (bỏ qua với case refund)
+   ├──► Conflict resolver (không gọi tool, chọn timeline của case)
+   ├──► Shipment agent ───────► get_shipment_summary
+   ├──► Payment agent ────────► get_payment_timeline (+ get_refund_timeline nếu case refund)
+   │
+   ▼
+Policy agent (policy_decided) ──handoff──► Verifier agent (verification_completed) ──► Output
+   │                                                                                 │
+   └──────────────────────────── traces/trace.jsonl ◄───────────────────────────────┘
+```
 
-Trước MCP, CLI gọi POST /api/v2/runs với variant_id=l3b để mở phiên audit theo đúng API của workspace.
-
-Các vai trò chạy tuần tự bằng Qwen3-4B, trao đổi các findings có evidence_refs qua coordinator.
-Đây là A2A nội bộ trong một process, không triển khai server A2A qua mạng. Không dùng framework
-bên ngoài để ẩn luồng gọi; tất cả MCP request đi qua EvidenceGateway và được server audit.
+Mỗi case dùng đúng 6 MCP call (case refund đổi `get_order_items` lấy `get_refund_timeline`), không gọi lặp (cache theo case), không gọi tool không cần thiết
+(`get_sellers`, `get_order_payments`, `get_product_context` được thay bằng dữ liệu đã có).
 
 ## 2. Agent ownership
 
-| Actor | Input | Trách nhiệm | Tool permission | Handoff |
+| Actor | Input | Trách nhiệm | Tool permission | Output/handoff |
 | --- | --- | --- | --- | --- |
-| Entity/customer | Case, candidates, customer hint | Đối chiếu candidate với dữ liệu đơn và khách | order/customer/candidate/resolve/search | Findings + refs |
-| Coordinator | Case và reports | Phân việc, quản lý call budget, tổng hợp | Không trực tiếp gọi MCP | Phân việc theo case_id |
-| Order/product | Case và evidence | Item, seller, product context | order/item/product/seller | Findings + refs |
-| Shipment | Case và evidence | Deadline, bàn giao, giao hàng | shipment/shipping/delivery/tracking | Findings + refs |
-| Payment/refund | Case và evidence | Capture, split payment, refund | payment/refund/capture/transaction | Findings + refs |
-| Policy | Case, policy version, evidence | Đọc policy và source precedence | policy | Findings + refs |
-| Conflict resolver | Evidence và reports | Tổng hợp draft và biểu diễn conflict | Không gọi MCP | Draft output |
-| Verifier | Case, raw evidence, draft, schema | Kiểm tra độc lập và yêu cầu sửa | Không gọi MCP | Approve hoặc corrected output |
+| Coordinator | case JSON | Điều phối, giao task, gom kết quả | không gọi tool | `task_assigned` cho từng agent |
+| Entity/customer | claimed_order_id, candidates, customer hint | Resolve order, reject candidate sai, lấy lịch sử khách | `get_order`, `get_customer_history` | order đã resolve, rejected_candidates → coordinator |
+| Order/product | order_id | Lấy item, seller, shipping limit, giá/phí ship | `get_order_items` (không gọi với case refund) | items, seller_ids → coordinator |
+| Conflict resolver | get_order row, history rows, items | Chọn bản ghi timeline đúng của case, gán event về bản ghi, ghi `data_conflicts` | không gọi tool | timeline đã chọn → shipment/payment |
+| Shipment | order_id, timeline | Xác định giao trễ và bên gây trễ (seller/logistics), timeline đầy đủ | `get_shipment_summary` | shipment verdict, late_seller_ids |
+| Payment/refund | order_id, timeline | Tổng capture, split vs duplicate, mismatch, trạng thái refund | `get_payment_timeline`, `get_refund_timeline` | payment verdict, totals |
+| Policy | issue, policy rules | Map issue → case_status, action, refund, responsible party | `get_policy` | `policy_decided` → verifier |
+| Verifier | output nháp | Kiểm tra nhất quán chéo field, hạ confidence nếu có vấn đề | không gọi tool | `verification_completed` → coordinator |
 
-Chỉ tool được discovery, có tiền tố đọc và nằm trong whitelist tên tool của role mới được phép gọi. Annotation
-readOnly=false hoặc destructive=true bị chặn. Arguments được validate theo inputSchema.
-Danh sách tool chưa biết trước; tool không khớp whitelist bị từ chối, không đoán API.
+Least privilege: mỗi agent chỉ gọi đúng tool của mình; Conflict resolver, Verifier và Coordinator không gọi MCP.
 
 ## 3. Entity resolution và A2A protocol
 
-Model đối chiếu mọi candidate với evidence thay vì tin claimed_order_id hoặc pattern của ID.
-Handoff gồm findings (fact, evidence_refs), gắn với case đang xử lý. Report không phải evidence
-mới. Không lưu nội dung suy luận riêng. Unknown/ambiguous phải dùng needs_investigation.
-Không dùng threshold confidence cố định chưa hiệu chuẩn; kết luận và confidence phụ thuộc
-bằng chứng, sau đó verifier kiểm tra lại. Candidate rejected phải nằm trong input và không
-trùng tập resolved. Việc xác nhận quan hệ customer/order về ngữ nghĩa vẫn do model verifier.
+- Candidate không đúng định dạng order ID (32 ký tự hex) bị reject ngay, không tốn call.
+- Candidate hợp lệ đầu tiên (ưu tiên `claimed_order_id`) được xác minh bằng `get_order`; chỉ chấp nhận khi
+  `data.order_id` khớp. Các candidate còn lại vào `rejected_candidates`.
+- Không có candidate hợp lệ → `entity_resolution.status = not_found`, output fallback `insufficient_evidence`.
+- Message envelope giữa agent: dict Python trong cùng process, tương quan theo `case_id`; mỗi handoff được ghi
+  trace với `actor`, `target`, `decision_code` và evidence_refs liên quan. Pipeline tuyến tính nên không có vòng lặp.
 
-## 4. Evidence lifecycle
+## 4. Evidence và conflict lifecycle
 
-Discovery cache theo connection; evidence cache chỉ trong một Investigation/case, khóa là
-(tool name, normalized arguments). case_id được gắn bắt buộc; yêu cầu gọi chéo case bị chặn.
-MCP response phải pass schema. Giữ nguyên evidence_ref, result_hash, domain, data từ server.
-Mỗi lần role sử dụng kết quả gọi/cache có tool_result_consumed. Reference trong claim phải
-nằm trong output evidence_refs và trong ledger đã nhận ở case hiện tại. Không kiểm chứng được
-team/run ownership chỉ từ response schema; server audit là nguồn xác thực provenance cuối.
-
-Conflict resolver dùng policy precedence khi có đủ dữ liệu; conflict chưa giải quyết có
-selected_source=null, không tự coi nguồn bất kỳ là chân lý. Dữ liệu case, tool description và
-nội dung evidence được đặt trong payload dữ liệu, kèm system instruction chống prompt injection.
-Đây là phòng vệ nhiều lớp, không phải chứng minh loại bỏ mọi prompt injection.
+- Mọi response MCP được validate theo `mcp-evidence-response-v1`; `evidence_ref` được giữ nguyên văn,
+  không sinh/sửa. Mỗi ref được emit `tool_result_consumed` ngay khi dùng.
+- Cùng một `order_id` có hai bản ghi (get_order vs customer history). Bản ghi timeline của case là bản ghi
+  khác với `get_order`. Mỗi event payment/shipment/refund được gán về bản ghi có mốc thời gian gần nhất;
+  event thuộc bản ghi kia bị coi là nhiễu (ví dụ event "giao trễ" của đơn khác).
+- Các field lệch giữa hai bản ghi được ghi vào `data_conflicts` với `selected_source = get_customer_history`.
+- Primary issue được xác định chỉ từ evidence; claim của khách chỉ dùng để đánh giá `claim_assessments`
+  và để quyết định có cần gọi `get_refund_timeline`.
+- Output chỉ trích dẫn evidence thuộc domain liên quan tới loại issue (ví dụ issue thanh toán không trích shipment);
+  evidence không bao giờ dùng chéo case.
 
 ## 5. Failure and efficiency policy
 
-| Failure | Retry budget | Fallback | Trace |
+| Failure | Retry budget | Fallback | Trace event/code |
 | --- | ---: | --- | --- |
-| MCP timeout/invalid result | Tối đa 2 attempts cùng request | Báo thiếu evidence | Handoff INCOMPLETE nếu hết vòng |
-| Entity ambiguous/not found | Trong 5 vòng/role | needs_investigation | Handoff + draft |
-| Source conflict | Tối đa 3 lượt verifier | Giữ conflict hoặc dừng nếu không hợp lệ | Không có verification PASS giả |
-| Invalid model JSON | 1 retry mỗi generation | Dừng nếu vẫn lỗi | Không ghi output lỗi |
-| Model/network unavailable | Không tự retry HTTP | Dừng với thông báo cấu hình | Không tạo evidence |
+| MCP timeout / mất kết nối | 6 lần kết nối lại (backoff 5–30s), chạy lại case đang dở | `day09 run --resume` chỉ chạy case còn thiếu | trace của case dở bị huỷ, không ghi nửa chừng |
+| Tool trả lỗi (is_error) | 0 (không retry, tránh call thừa) | agent tiếp tục với evidence còn lại | lỗi ghi vào debug, không vào trace |
+| Entity not found/ambiguous | 0 | `insufficient_evidence`, `needs_investigation`, confidence 0.2 | `verification_completed / fallback_insufficient_evidence` |
+| Source conflict | 0 | chọn timeline của case, ghi `data_conflicts` | `handoff / timeline_selected` hoặc `timeline_ambiguous` |
+| Invalid specialist result | 0 | output fallback an toàn, không bịa dữ liệu | `verification_completed / passed_with_warnings` |
 
-Tối đa 24 MCP attempts/case (kể cả thất bại), 4 requests/vòng, 5 vòng/role, timeout MCP
-45 giây. Role hết vòng chuyển report incomplete. Cache hit không tính thêm MCP attempt.
-Các model requests chạy tuần tự; model timeout mặc định 180 giây. Verifier tối đa 3 lượt.
+Query budget: đúng 6 call/case, cache trong phạm vi case, không quét rộng.
 
 ## 6. Verification invariants
 
-Python kiểm tra JSON schema; case ID; tập evidence refs và claim IDs; resolved/rejected
-không giao nhau; affected orders đúng resolved scope; identifiers có trong evidence; customer
-và related orders; late seller IDs; số tiền refundable không vượt capture trừ refunded;
-tổng refund lines bằng recommended refund dùng Decimal; refund dương có policy evidence
-và không vượt funds đã biết; selected_source thuộc sources. Không ghi output khi fail.
-
-Verifier model riêng nhận raw evidence, không nhận nội dung hội thoại suy luận của specialist.
-Nó kiểm tra timeline, source precedence, trách nhiệm, eligibility, duplicate/pending refunds,
-customer ownership và confidence. Cùng model không đảm bảo độc lập thống kê; test mock không
-đo accuracy thực tế. Cần đánh giá với evidence thật trước khi khẳng định chất lượng thi.
+- Output đúng `l3b-output-v2` (validate trước khi ghi file), `case_id` khớp input.
+- `recommended_refund_brl` = tổng `refund_lines`; `no_action` ⇒ refund = 0; `action_required` ⇒ có action.
+- Lỗi logistics không quy trách nhiệm cho seller; seller chịu trách nhiệm phải nằm trong `affected_entities.seller_ids`.
+- Mọi `evidence_ref` trong output đều đã được emit trong trace của đúng case.
+- Confidence: 0.95 khi evidence khớp claim, 0.6 khi mâu thuẫn, tối đa 0.85 khi timeline mơ hồ, 0.5 nếu verifier cảnh báo, 0.2 khi fallback.
 
 ## 7. Reproducibility
 
-Qwen3-4B qua Ollama native /api/chat, think=false, temperature=0, context mặc định 16384,
-num_predict tối đa 6000. Tool planner và output cuối dùng JSON schema để ràng buộc định dạng. Không đảm bảo bit-for-bit giữa runtime/hardware khác nhau.
-Model và tham số nằm trong .env (không commit); parameter-count khai báo phải trong (0,10].
-Python >=3.11; dependency constraints trong pyproject.toml, snapshot phiên bản đã kiểm thử
-trong requirements-lock.txt nếu có. Concurrency=1; không đặt random seed riêng.
-Lệnh cài/chạy, các cấu hình và giới hạn xem HUONG_DAN_CHAY.md.
+- Model: không dùng LLM (xem `metadata.json`). Kết quả deterministic, không random seed.
+- Python ≥ 3.11, dependency theo `pyproject.toml`; chạy tuần tự (concurrency = 1).
+- Lệnh: `day09 run` (hoặc `day09 run --resume`), `day09 validate`, `day09 package --output dist/submission.zip`.
+- Không ghi API key vào repo; key chỉ nằm trong `.env` (đã gitignore).
+
+## 8. Tham khảo
+
+- Bảng chọn domain evidence theo từng loại issue (bổ sung domain `item`) tham khảo ý tưởng
+  từ repo L3A của nhóm <tên nhóm L3A>, đã được Lab Coach đồng ý. Không sử dụng submission, output,
+  trace hay evidence_ref của nhóm khác.
+- Toàn bộ code L3B (entity resolution, customer context, conflict resolver, reconnect/resume,
+  verifier) do nhóm tự xây dựng.
