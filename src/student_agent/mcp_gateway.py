@@ -21,10 +21,17 @@ class EvidenceGateway:
         response = await self._session.list_tools()
         return sorted(tool.name for tool in response.tools)
 
+    async def describe_tools(self) -> list[dict[str, Any]]:
+        response = await self._session.list_tools()
+        return [
+            tool.model_dump(mode="json", exclude_none=True)
+            for tool in sorted(response.tools, key=lambda t: t.name)
+        ]
+
     async def call(self, tool_name: str, *, case_id: str, **arguments: str) -> dict[str, Any]:
         payload = {"case_id": case_id, **arguments}
         result = await self._session.call_tool(tool_name, arguments=payload)
-        if result.isError:
+        if getattr(result, "is_error", None) or getattr(result, "isError", False):
             message = " ".join(
                 block.text for block in result.content if getattr(block, "text", None)
             )

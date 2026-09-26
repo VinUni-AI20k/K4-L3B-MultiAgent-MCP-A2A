@@ -1,0 +1,8 @@
+﻿{
+  "team": "K4-TeamXX-<TenNhom>",
+  "variant": "l3b",
+  "model": "none (deterministic rule-based agents, no LLM)",
+  "model_parameters": "0",
+  "framework": "pure Python asyncio multi-agent",
+  "mcp_calls_per_case": "6-7"
+}
