@@ -44,17 +44,11 @@ FULL_REFUND_ISSUES = {"canceled_order_paid", "unavailable_order_paid"}
 RELEVANT_DOMAINS = {
     "late_delivery_seller": {"policy", "order", "item", "shipment", "customer"},
     "late_delivery_logistics": {"policy", "order", "item", "shipment", "customer"},
-    "canceled_order_paid": {"policy", "order", "payment", "customer"},
-    "unavailable_order_paid": {"policy", "order", "item", "payment", "customer"},
-    "valid_split_payment": {"policy", "order", "payment", "customer"},
-    "payment_mismatch": {"policy", "order", "payment", "customer"},
-    "duplicate_charge": {"policy", "order", "payment", "customer"},
     "refund_pending": {"policy", "order", "payment", "refund", "customer"},
     "refund_failed": {"policy", "order", "payment", "refund", "customer"},
     "unsupported_claim": {"policy", "order", "shipment", "payment", "customer"},
     "insufficient_evidence": {"policy", "order", "customer"},
 }
-
 
 # ---------------------------------------------------------------- helpers
 def _num(value: Any) -> float | None:
@@ -203,7 +197,9 @@ async def customer_agent(ctx: CaseContext, order_id: str) -> dict[str, Any]:
     }
 
 
-async def order_agent(ctx: CaseContext, order_id: str) -> dict[str, Any]:
+async def order_agent(ctx: CaseContext, order_id: str, need_items: bool) -> dict[str, Any]:
+    if not need_items:  # tiet kiem call: case refund khong can du lieu item
+        return {"items": [], "item_ids": [], "seller_ids": []}
     ctx.assign("order-agent", "order_items")
     ev = await ctx.fetch("order-agent", "get_order_items", order_id=order_id)
     items = [r for r in (ev or {}).get("data") or [] if isinstance(r, dict)]
@@ -352,6 +348,7 @@ async def payment_agent(
         raw = rdata.get("events", []) if isinstance(rdata, dict) else rdata
         refund_events = [e for e in raw or [] if isinstance(e, dict)]
 
+    payments = [p for p in data.get("payments", []) if isinstance(p, dict)]
     captures = [
         _num(e.get("amount_brl")) or 0.0
         for e in events
@@ -368,6 +365,17 @@ async def payment_agent(
                 duplicate = True
     if scen["ambiguous"] and split:
         captures = [a for a in captures if Counter(captures)[a] >= 2]
+    remaining = list(captures)
+    references: list[str] = []
+    for row in payments:
+        value = _num(row.get("payment_value"))
+        if value is None or value not in remaining:
+            continue
+        remaining.remove(value)
+        seq = str(row.get("payment_sequential") or "").strip()
+        ref = f"{order_id}-{seq}" if seq else order_id
+        if ref not in references:
+            references.append(ref)
     refund_status = {str(e.get("status")) for e in refund_events}
     refunded = round(
         sum(
@@ -380,6 +388,7 @@ async def payment_agent(
     ctx.handoff("payment-agent", "coordinator", "payment_ready", ctx.refs("payment", "refund"))
     return {
         "captured_total": round(sum(captures), 2) if captures else None,
+        "payment_references": references,
         "refunded_total": refunded,
         "refund_failed": "failed" in refund_status,
         "refund_pending": "pending" in refund_status,
@@ -490,7 +499,7 @@ async def _solve(ctx: CaseContext) -> dict[str, Any]:
     oid = entity["order_id"]
 
     cust = await customer_agent(ctx, oid)
-    items = await order_agent(ctx, oid)
+    items = await order_agent(ctx, oid, need_items=claimed not in REFUND_ISSUES)
     scen = conflict_resolver(ctx, entity["order"], cust, items["items"])
     ship = await shipment_agent(ctx, oid, scen)
     pay = await payment_agent(ctx, oid, scen, want_refund=claimed in REFUND_ISSUES)
@@ -567,8 +576,8 @@ async def _solve(ctx: CaseContext) -> dict[str, Any]:
             "order_ids": [oid],
             "item_ids": items["item_ids"][:20],
             "seller_ids": items["seller_ids"][:20],
-            "payment_references": [],
-            "shipment_ids": [],
+            "payment_references": pay["payment_references"][:20],
+            "shipment_ids": [oid],
         },
         "claim_assessments": claim_assessments,
         "entity_resolution": {

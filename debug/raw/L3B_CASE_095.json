@@ -1,0 +1,108 @@
+{
+  "case": {
+    "case_id": "L3B_CASE_095",
+    "opened_at": "2018-05-14T09:00:00-03:00",
+    "customer_request": {
+      "language": "vi",
+      "message": "Đối soát end-to-end, xử lý nguồn mâu thuẫn và chỉ đề xuất refund khi timeline authoritative hỗ trợ.",
+      "claimed_order_id": "0e4a4de1d15b6df8d4335fb2db61667a",
+      "claims": [
+        {
+          "claim_id": "claim-095-a",
+          "topic": "refund_pending"
+        },
+        {
+          "claim_id": "claim-095-b",
+          "topic": "requested_full_refund"
+        }
+      ]
+    },
+    "policy_version": "EC_POLICY_V2",
+    "candidate_order_ids": [
+      "0e4a4de1d15b6df8d4335fb2db61667a",
+      "candidate-095"
+    ],
+    "investigation_scope": {
+      "include_customer_history": true,
+      "include_product_context": true,
+      "require_independent_verification": true
+    },
+    "customer_unique_id_hint": "customer-5fb2db61667a"
+  },
+  "calls": {
+    "get_policy": {
+      "args": {
+        "policy_version": "EC_POLICY_V2"
+      },
+      "evidence": null
+    },
+    "get_order": {
+      "args": {
+        "order_id": "0e4a4de1d15b6df8d4335fb2db61667a"
+      },
+      "evidence": null
+    }
+  },
+  "errors": [
+    "get_policy: MCP tool get_policy failed: Error executing tool get_policy",
+    "get_order: MCP tool get_order failed: Error executing tool get_order"
+  ],
+  "output": {
+    "schema_version": "day09-l3b-output-v2",
+    "case_id": "L3B_CASE_095",
+    "assessment": {
+      "primary_issue": "insufficient_evidence",
+      "secondary_issues": [],
+      "case_status": "needs_investigation",
+      "confidence": 0.2
+    },
+    "affected_entities": {
+      "order_ids": [],
+      "item_ids": [],
+      "seller_ids": [],
+      "payment_references": [],
+      "shipment_ids": []
+    },
+    "entity_resolution": {
+      "status": "not_found",
+      "resolved_order_ids": [],
+      "rejected_candidates": [
+        "0e4a4de1d15b6df8d4335fb2db61667a",
+        "candidate-095"
+      ],
+      "confidence": 0.2
+    },
+    "customer_context": {
+      "customer_unique_id": "customer-5fb2db61667a",
+      "related_order_ids": []
+    },
+    "shipment_analysis": {
+      "verdict": "insufficient_evidence",
+      "late_seller_ids": [],
+      "timeline_complete": false
+    },
+    "payment_analysis": {
+      "verdict": "insufficient_evidence",
+      "captured_total_brl": null,
+      "refunded_total_brl": null,
+      "refundable_total_brl": null
+    },
+    "root_cause_analysis": {
+      "ranked_causes": [],
+      "responsible_parties": [
+        {
+          "party_type": "unknown",
+          "party_id": null
+        }
+      ]
+    },
+    "evidence_refs": [],
+    "data_conflicts": [],
+    "financial_resolution": {
+      "currency": "BRL",
+      "recommended_refund_brl": 0.0,
+      "refund_lines": []
+    },
+    "resolution_actions": []
+  }
+}
